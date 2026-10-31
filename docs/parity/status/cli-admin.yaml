@@ -76,6 +76,15 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportSkippedMovedClusterKeepsItsSecret
     - internal/cli/admin/backup_test.go:TestImportSkippedClusterKeepsItsSecretAtTheSameServer
     - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsASecretOfTheBackup
+    - internal/cli/admin/backup_test.go:TestImportRefusesACrossedHeldSecret
+    - internal/cli/admin/backup_test.go:TestImportAllowsAHeldSecretThatDoesNotCross
+    - internal/cli/admin/backup_test.go:TestImportRefusesAClusterLabelledOnlyInTheLiveState
+    - internal/cli/admin/backup_test.go:TestImportRestoresTheSecretOfAClusterLabelledOnlyInTheLiveState
+    - internal/cli/admin/backup_test.go:TestImportPrunesTheSecretOfAPrunedCluster
+    - internal/cli/admin/backup_test.go:TestImportSaysAHeldSecretWasNotRestored
+    - internal/cli/admin/backup_test.go:TestImportGivesAnUnchangedSecretItsOwner
+    - internal/cli/admin/backup_test.go:TestImportGivesAnUnchangedApplicationItsOwner
     - internal/cli/admin/backup_test.go:TestImportUpdatesASecretOnlyTheBackupReferences
     - internal/cli/admin/backup_test.go:TestImportNeverWritesAnInstallationSecretABackupReferences
     - internal/cli/admin/backup_test.go:TestImportClusterCheckRefusesOnlyAMovedCluster
@@ -300,18 +309,29 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportSkippedMovedClusterKeepsItsSecret
     - internal/cli/admin/backup_test.go:TestImportSkippedClusterKeepsItsSecretAtTheSameServer
     - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsASecretOfTheBackup
+    - internal/cli/admin/backup_test.go:TestImportRefusesACrossedHeldSecret
+    - internal/cli/admin/backup_test.go:TestImportAllowsAHeldSecretThatDoesNotCross
+    - internal/cli/admin/backup_test.go:TestImportRefusesAClusterLabelledOnlyInTheLiveState
+    - internal/cli/admin/backup_test.go:TestImportRestoresTheSecretOfAClusterLabelledOnlyInTheLiveState
+    - internal/cli/admin/backup_test.go:TestImportPrunesTheSecretOfAPrunedCluster
+    - internal/cli/admin/backup_test.go:TestImportSaysAHeldSecretWasNotRestored
+    - internal/cli/admin/backup_test.go:TestImportGivesAnUnchangedSecretItsOwner
+    - internal/cli/admin/backup_test.go:TestImportGivesAnUnchangedApplicationItsOwner
     - internal/cli/admin/backup_test.go:TestImportUpdatesASecretOnlyTheBackupReferences
     - internal/cli/admin/backup_test.go:TestImportNeverWritesAnInstallationSecretABackupReferences
     - internal/cli/admin/backup_test.go:TestImportClusterCheckRefusesOnlyAMovedCluster
     - internal/cli/admin/backup_test.go:TestImportHidesCredentialsInServers
     - internal/cli/admin/backup_test.go:TestImportDeletedClusterComesBackAndTheOtherIsKept
-  evidence: docs/verification/log.md#V-0055
+  evidence: docs/verification/log.md#V-0056
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
     writing and --keep-live-clusters keeps the live Cluster and its Secret. A Cluster skipped by
     --skip-resources-with-label is not refused and keeps the Secret it references, as upstream's
-    label covers both.
+    label covers both, whether or not the backup holds that Cluster. A backup that would start
+    another Cluster reading a Secret held this way is refused too, unless the backup uses that
+    Secret for the server of the Cluster it is held for.
 
 NOTIF-104:
   status: verified

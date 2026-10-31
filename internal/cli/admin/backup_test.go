@@ -719,6 +719,36 @@ func createClusterSecret(t *testing.T, ctx contextT, ns, name, token string, lab
 	}})
 }
 
+// createLiveCluster creates a Cluster reading secret, as one written after the backup would be.
+func createLiveCluster(t *testing.T, ctx contextT, ns, name, server, secret string, labels map[string]string) {
+	t.Helper()
+	cluster := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": currentGroup + "/v1alpha1", "kind": "Cluster",
+		"metadata": map[string]any{"name": name},
+		"spec":     map[string]any{"name": name, "server": server, "config": map[string]any{"credentialsRef": map[string]any{"name": secret}}},
+	}}
+	cluster.SetLabels(labels)
+	createObject(t, ctx, ns, cluster)
+}
+
+func labelEdgeLab(t *testing.T, ctx contextT, ns string) {
+	t.Helper()
+	live, err := clusterObjects(ns).Get(ctx, "edge-lab", metav1.GetOptions{})
+	require.NoError(t, err)
+	live.SetLabels(skipMe)
+	_, err = clusterObjects(ns).Update(ctx, live, metav1.UpdateOptions{})
+	require.NoError(t, err)
+}
+
+func clusterExists(t *testing.T, ctx contextT, ns, name string) bool {
+	t.Helper()
+	_, err := clusterObjects(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		require.True(t, apierrors.IsNotFound(err), "%v", err)
+	}
+	return err == nil
+}
+
 func repositoryExists(t *testing.T, ctx contextT, ns, name string) bool {
 	t.Helper()
 	_, err := envDyn.Resource(kindRepository.gvr(currentGroup)).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
@@ -757,6 +787,8 @@ func applicationExists(t *testing.T, ctx contextT, ns, name string) bool {
 
 // A Cluster's server cannot change and the import cannot know which one is right: it names every
 // such Cluster before writing, so nothing is half restored and a dry run predicts the refusal.
+var skipMe = map[string]string{"skipme": "true"}
+
 func TestImportRefusesMovedClusters(t *testing.T) {
 	ctx := requireEnv(t)
 	ns := newNamespace(t, ctx, "moved")
@@ -953,16 +985,291 @@ func TestImportSkippedLiveClusterKeepsItsSecret(t *testing.T) {
 	backup := exportBackup(t, ctx, tio)
 	const secret = "cluster-since-backup"
 	createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
-	createObject(t, ctx, ns, &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": currentGroup + "/v1alpha1", "kind": "Cluster",
-		"metadata": map[string]any{"name": "since-backup", "labels": map[string]any{"skipme": "true"}},
-		"spec":     map[string]any{"name": "since-backup", "server": greenServer, "config": map[string]any{"credentialsRef": map[string]any{"name": secret}}},
-	}})
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, secret, skipMe)
 
 	tio.out.Reset()
 	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", "--skip-resources-with-label", "skipme=true", backup))
 	assert.Contains(t, tio.out.String(), "/Secret "+secret+" is not in the backup; not pruned: credentials of the live Cluster since-backup\n")
 	assert.Equal(t, greenToken, liveToken(t, ctx, ns, secret))
+}
+
+// The hold has to come before the Secrets are written: the backup holds this one, and only the
+// Cluster it stays for is not in the backup. edge-lab already reads it, so nothing starts to.
+func TestImportSkippedLiveClusterKeepsASecretOfTheBackup(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "skipheld")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, edgeLabSecret, skipMe)
+	setToken(t, ctx, ns, edgeLabSecret, greenToken)
+
+	for _, args := range [][]string{{"--dry-run"}, nil} {
+		tio.out.Reset()
+		require.NoError(t, tio.run(ctx, append([]string{"admin", "import", "--skip-resources-with-label", "skipme=true", backup}, args...)...))
+		assert.Contains(t, tio.out.String(), "/Secret "+edgeLabSecret+" in namespace "+ns+" kept: credentials of the live Cluster since-backup")
+	}
+	assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
+}
+
+// A Secret holds one server's credentials. If a Cluster of the backup started reading one held for
+// a Cluster elsewhere, either the new Cluster or the kept one would present the other's.
+func TestImportRefusesACrossedHeldSecret(t *testing.T) {
+	const holderServer = "https://user:live-userinfo@since.example.com/api?token=live-query"
+	for name, tc := range map[string]struct {
+		args                  []string
+		seed, arrive          func(t *testing.T, ctx contextT, ns string)
+		reader, holder, shown string
+	}{
+		"held for a skipped Cluster the backup does not hold": {
+			args: []string{"--skip-resources-with-label", "skipme=true"},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+				createLiveCluster(t, ctx, ns, "since-backup", holderServer, edgeLabSecret, skipMe)
+				setToken(t, ctx, ns, edgeLabSecret, greenToken)
+			},
+			reader: "edge-lab", holder: "since-backup", shown: "https://since.example.com/api",
+		},
+		"held for a kept Cluster": {
+			args: []string{"--keep-live-clusters"},
+			seed: func(t *testing.T, ctx contextT, ns string) {
+				repointCluster(t, ctx, ns, "prod-us", "https://prod-us.example.com", edgeLabSecret)
+			},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "prod-us", metav1.DeleteOptions{}))
+				moveEdgeLab(t, ctx, ns)
+			},
+			reader: "prod-us", holder: "edge-lab", shown: greenServer,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := requireEnv(t)
+			ns := newNamespace(t, ctx, "crossed")
+			seedPatrol(t, ctx, ns)
+			if tc.seed != nil {
+				tc.seed(t, ctx, ns)
+			}
+			tio := newTestIO(ns)
+			backup := exportBackup(t, ctx, tio)
+			tc.arrive(t, ctx, ns)
+			require.NoError(t, envDyn.Resource(kindRepository.gvr(currentGroup)).Namespace(ns).Delete(ctx, "repo-managed", metav1.DeleteOptions{}))
+
+			dryRunErr := tio.run(ctx, append([]string{"admin", "import", "--dry-run", backup}, tc.args...)...)
+			require.Error(t, dryRunErr)
+			err := tio.run(ctx, append([]string{"admin", "import", backup}, tc.args...)...)
+			require.Error(t, err)
+			assert.Equal(t, dryRunErr.Error(), err.Error(), "a dry run refuses with the same text")
+			assert.Equal(t, 1, ExitCode(err))
+			assert.Contains(t, err.Error(), "nothing was written")
+			assert.Contains(t, err.Error(), tc.reader+": Secret "+edgeLabSecret+" is kept for "+tc.holder+" at "+tc.shown+"\n")
+			assert.False(t, repositoryExists(t, ctx, ns, "repo-managed"), "nothing is restored")
+			assert.False(t, clusterExists(t, ctx, ns, tc.reader))
+			assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
+
+			// Leaving the new reader out is the way through, whichever Cluster the Secret stays for.
+			editBackup(t, backup, "name: "+tc.reader+"\nspec:", "name: "+tc.reader+"\n  labels: {skipme: \"true\"}\nspec:")
+			require.NoError(t, tio.run(ctx, append([]string{"admin", "import", "--skip-resources-with-label", "skipme=true", backup}, tc.args...)...))
+			assert.True(t, repositoryExists(t, ctx, ns, "repo-managed"))
+			assert.False(t, clusterExists(t, ctx, ns, tc.reader))
+			assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
+		})
+	}
+}
+
+// Nothing crosses in these, so the refusal above must not stop them.
+func TestImportAllowsAHeldSecretThatDoesNotCross(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args         []string
+		seed, arrive func(t *testing.T, ctx contextT, ns string)
+		created      string
+	}{
+		"the live Cluster is at the backup's server": {
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+				createLiveCluster(t, ctx, ns, "since-backup", edgeLabServer+"/", edgeLabSecret, skipMe)
+			},
+			created: edgeLabServer,
+		},
+		"the backup's text of that server has the slash": {
+			seed: func(t *testing.T, ctx contextT, ns string) {
+				repointCluster(t, ctx, ns, "edge-lab", edgeLabServer+"/", edgeLabSecret)
+			},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+				createLiveCluster(t, ctx, ns, "since-backup", edgeLabServer, edgeLabSecret, skipMe)
+			},
+			created: edgeLabServer + "/",
+		},
+		"the backup uses the Secret at both servers": {
+			seed: func(t *testing.T, ctx contextT, ns string) {
+				createLiveCluster(t, ctx, ns, "shared", greenServer, edgeLabSecret, skipMe)
+			},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+			},
+			created: edgeLabServer,
+		},
+		"the backup's Cluster stays too": {
+			args: []string{"--keep-live-clusters"},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				const other = "cluster-edge-lab-green"
+				createClusterSecret(t, ctx, ns, other, greenToken, nil)
+				repointCluster(t, ctx, ns, "edge-lab", greenServer, other)
+				createLiveCluster(t, ctx, ns, "since-backup", "https://since.example.com", edgeLabSecret, skipMe)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := requireEnv(t)
+			ns := newNamespace(t, ctx, "uncrossed")
+			seedPatrol(t, ctx, ns)
+			if tc.seed != nil {
+				tc.seed(t, ctx, ns)
+			}
+			tio := newTestIO(ns)
+			backup := exportBackup(t, ctx, tio)
+			tc.arrive(t, ctx, ns)
+			setToken(t, ctx, ns, edgeLabSecret, greenToken)
+
+			require.NoError(t, tio.run(ctx, append([]string{"admin", "import", "--skip-resources-with-label", "skipme=true", backup}, tc.args...)...))
+			assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
+			if tc.created != "" {
+				assert.Equal(t, tc.created, liveServer(t, ctx, ns, "edge-lab"))
+			}
+		})
+	}
+}
+
+// The label that counts on a Cluster the backup holds is the backup's, because that is what skips
+// the write: with it only on the live object, the update would fail after other objects were written.
+func TestImportRefusesAClusterLabelledOnlyInTheLiveState(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "livelabel")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	moveEdgeLab(t, ctx, ns)
+	labelEdgeLab(t, ctx, ns)
+
+	err := tio.run(ctx, "admin", "import", "--skip-resources-with-label", "skipme=true", backup)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "edge-lab: live "+greenServer+", backup "+edgeLabServer)
+}
+
+// At its own server the same Cluster is written, so its Secret is restored with it.
+func TestImportRestoresTheSecretOfAClusterLabelledOnlyInTheLiveState(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "livelabelsame")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	labelEdgeLab(t, ctx, ns)
+	setToken(t, ctx, ns, edgeLabSecret, greenToken)
+
+	require.NoError(t, tio.run(ctx, "admin", "import", "--skip-resources-with-label", "skipme=true", backup))
+	assert.Empty(t, liveToken(t, ctx, ns, edgeLabSecret), "the backup's Secret has no token")
+}
+
+// Only a Cluster that stays holds its Secret: a pruned one takes the Secret along.
+func TestImportPrunesTheSecretOfAPrunedCluster(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "prunecreds")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	const secret = "cluster-since-backup"
+	createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, secret, nil)
+
+	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", backup))
+	assert.False(t, clusterExists(t, ctx, ns, "since-backup"))
+	_, err := envKube.CoreV1().Secrets(ns).Get(ctx, secret, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "%v", err)
+}
+
+// A held Secret that is gone cannot be kept, and the backup's copy may belong to another server, so
+// the import says what happened and leaves it to the operator.
+func TestImportSaysAHeldSecretWasNotRestored(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "heldgone")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {skipme: \"true\"}\nspec:")
+	moveEdgeLab(t, ctx, ns)
+	require.NoError(t, envKube.CoreV1().Secrets(ns).Delete(ctx, edgeLabSecret, metav1.DeleteOptions{}))
+
+	tio.out.Reset()
+	require.NoError(t, tio.run(ctx, "admin", "import", "--skip-resources-with-label", "skipme=true", backup))
+	assert.Contains(t, tio.out.String(), "/Secret "+edgeLabSecret+" in namespace "+ns+" not restored: credentials of the live Cluster edge-lab\n")
+	assert.NotContains(t, tio.out.String(), " kept: ")
+	_, err := envKube.CoreV1().Secrets(ns).Get(ctx, edgeLabSecret, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "%v", err)
+}
+
+// The steps in --help orphan the Secret, which may well match the backup, and the new Cluster has
+// to own it or the Secret outlives the Cluster.
+func TestImportGivesAnUnchangedSecretItsOwner(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "reown")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	ownerless := exportBackup(t, ctx, tio)
+	cluster, err := clusterObjects(ns).Get(ctx, "edge-lab", metav1.GetOptions{})
+	require.NoError(t, err)
+	secrets := envKube.CoreV1().Secrets(ns)
+	sec, err := secrets.Get(ctx, edgeLabSecret, metav1.GetOptions{})
+	require.NoError(t, err)
+	sec.OwnerReferences = []metav1.OwnerReference{{APIVersion: cluster.GetAPIVersion(), Kind: "Cluster", Name: "edge-lab", UID: cluster.GetUID()}}
+	sec, err = secrets.Update(ctx, sec, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	backup := exportBackup(t, ctx, tio)
+	require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+	sec.OwnerReferences = nil
+	_, err = secrets.Update(ctx, sec, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	tio.out.Reset()
+	require.NoError(t, tio.run(ctx, "admin", "import", "--dry-run", backup))
+	assert.Contains(t, tio.out.String(), "/Secret "+edgeLabSecret+" in namespace "+ns+" updated (dry run)\n")
+
+	require.NoError(t, tio.run(ctx, "admin", "import", backup))
+	cluster, err = clusterObjects(ns).Get(ctx, "edge-lab", metav1.GetOptions{})
+	require.NoError(t, err)
+	sec, err = secrets.Get(ctx, edgeLabSecret, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, sec.OwnerReferences, 1)
+	assert.Equal(t, cluster.GetUID(), sec.OwnerReferences[0].UID)
+
+	tio.out.Reset()
+	require.NoError(t, tio.run(ctx, "admin", "import", "--verbose", backup))
+	assert.Contains(t, tio.out.String(), "/Secret "+edgeLabSecret+" unchanged\n", "a second import has nothing to do")
+
+	tio.out.Reset()
+	require.NoError(t, tio.run(ctx, "admin", "import", "--verbose", ownerless))
+	assert.Contains(t, tio.out.String(), "/Secret "+edgeLabSecret+" unchanged\n", "a backup that names no owner has nothing to restore")
+}
+
+// The same goes for any owned object: an Application that lost its ApplicationSet gets it back.
+func TestImportGivesAnUnchangedApplicationItsOwner(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "reownapp")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	applications := envDyn.Resource(kindApplication.gvr(currentGroup)).Namespace(ns)
+	app, err := applications.Get(ctx, "guestbook-list-dev", metav1.GetOptions{})
+	require.NoError(t, err)
+	owners := app.GetOwnerReferences()
+	require.Len(t, owners, 1)
+	app.SetOwnerReferences(nil)
+	_, err = applications.Update(ctx, app, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, tio.run(ctx, "admin", "import", backup))
+	app, err = applications.Get(ctx, "guestbook-list-dev", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, owners, app.GetOwnerReferences())
 }
 
 // Nothing live has to reference a Secret for it to exist: the steps in --help delete its Cluster, and
@@ -1017,20 +1324,32 @@ func TestImportUpdatesASecretOnlyTheBackupReferences(t *testing.T) {
 // A reference from the backup must not bring in a Secret that is not configuration: a backup naming
 // one stops at it, as it always did.
 func TestImportNeverWritesAnInstallationSecretABackupReferences(t *testing.T) {
-	ctx := requireEnv(t)
-	ns := newNamespace(t, ctx, "install")
-	seedPatrol(t, ctx, ns)
-	tio := newTestIO(ns)
-	backup := exportBackup(t, ctx, tio)
-	require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
-	editBackup(t, backup, edgeLabSecret, initialAdminSecretName)
+	const tlsSecret = "patrol-server-tls"
+	for name, tc := range map[string]struct{ secret, key, value string }{
+		"the initial admin password": {initialAdminSecretName, "password", "initial-pass"},
+		"a TLS Secret":               {tlsSecret, "tls.crt", "live-certificate"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := requireEnv(t)
+			ns := newNamespace(t, ctx, "install")
+			seedPatrol(t, ctx, ns)
+			createObject(t, ctx, ns, &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "metadata": map[string]any{"name": tlsSecret},
+				"stringData": map[string]any{"tls.crt": "live-certificate", "tls.key": "live-key"},
+			}})
+			tio := newTestIO(ns)
+			backup := exportBackup(t, ctx, tio)
+			require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+			editBackup(t, backup, edgeLabSecret, tc.secret)
 
-	err := tio.run(ctx, "admin", "import", backup)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists")
-	sec, err := envKube.CoreV1().Secrets(ns).Get(ctx, initialAdminSecretName, metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, "initial-pass", string(sec.Data["password"]))
+			err := tio.run(ctx, "admin", "import", backup)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "already exists")
+			sec, err := envKube.CoreV1().Secrets(ns).Get(ctx, tc.secret, metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.value, string(sec.Data[tc.key]))
+		})
+	}
 }
 
 func TestImportClusterCheckRefusesOnlyAMovedCluster(t *testing.T) {
@@ -1079,14 +1398,15 @@ func TestImportHidesCredentialsInServers(t *testing.T) {
 	refusal := tio.run(ctx, "admin", "import", backup)
 	require.Error(t, refusal)
 	assert.Contains(t, refusal.Error(), "edge-lab: "+shown)
+	said := refusal.Error() + tio.out.String() + tio.errOut.String()
 
 	tio.out.Reset()
 	require.NoError(t, tio.run(ctx, "admin", "import", "--keep-live-clusters", backup))
 	assert.Contains(t, tio.out.String(), "kept: "+shown)
+	said += tio.out.String() + tio.errOut.String()
 
 	for _, value := range []string{"live-userinfo", "live-query", "backup-userinfo", "backup-query"} {
-		assert.NotContains(t, refusal.Error(), value)
-		assert.NotContains(t, tio.out.String(), value)
+		assert.NotContains(t, said, value)
 	}
 }
 

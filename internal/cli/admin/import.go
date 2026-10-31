@@ -79,7 +79,12 @@ live Cluster of the same name is refused before anything is written, with or wit
 --dry-run, listing every such Cluster. A difference of trailing slashes is the same server
 and is not refused. With --keep-live-clusters the live Cluster and the Secret it references
 stay as they are, also under --prune, and the rest of the backup is restored. A Cluster
-skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too.
+skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too,
+whether or not the backup holds that Cluster.
+
+A Secret holds one server's credentials. A backup that would start another Cluster reading a
+Secret kept this way is refused the same way, unless the backup uses that Secret for the server
+of the Cluster it is kept for.
 
 Restoring a Cluster's server (the backup is right, the live Cluster is wrong):
   1. Note the replicas of the ApplicationSet controller, stop it and wait for its pods to go:
@@ -232,6 +237,8 @@ type importer struct {
 	// kept are the backup objects not imported because the live Cluster they belong to points
 	// at another server, with the reason printed.
 	kept map[resourceKey]string
+	// holders holds, by Secret, the live Clusters a Secret in kept stays for.
+	holders map[resourceKey][]*unstructured.Unstructured
 }
 
 func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string, o importOptions) error {
@@ -259,7 +266,8 @@ func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string
 		return err
 	}
 	im := &importer{f: f, out: out, kc: kc, scope: scope, o: o, live: map[resourceKey]*unstructured.Unstructured{}, uids: map[resourceKey]types.UID{},
-		unmanaged: map[resourceKey]bool{}, pruned: map[resourceKey]bool{}, backupHasSecrets: containsSecrets(objs), kept: map[resourceKey]string{}}
+		unmanaged: map[resourceKey]bool{}, pruned: map[resourceKey]bool{}, backupHasSecrets: containsSecrets(objs), kept: map[resourceKey]string{},
+		holders: map[resourceKey][]*unstructured.Unstructured{}}
 	if o.dryRun {
 		im.dryRunMsg = " (dry run)"
 	}
@@ -299,9 +307,10 @@ func (im *importer) warn(msg string) { im.f.logger().Warn(msg) }
 // compares clusters.NormalizeServer, so a difference of trailing slashes takes the live text. A real
 // difference is refused unless the operator chose the live server with --keep-live-clusters. A
 // Cluster that stays, by that flag or by the skip label, keeps the Secret it reads, because
-// credentials belong to one server.
+// credentials belong to one server. That has to be known before the first Secret is written.
 func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error {
 	var moved []string
+	inBackup := map[resourceKey]bool{}
 	for _, bak := range objs {
 		if bak.GetKind() != kindCluster.Kind {
 			continue
@@ -309,12 +318,12 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		if bak.GetNamespace() == "" {
 			bak.SetNamespace(im.scope.controlPlane)
 		}
+		inBackup[keyOf(bak)] = true
 		live, ok := im.live[keyOf(bak)]
 		if !ok {
 			continue
 		}
-		server, _, _ := unstructured.NestedString(bak.Object, "spec", "server")
-		liveServer, _, _ := unstructured.NestedString(live.Object, "spec", "server")
+		server, liveServer := serverOf(bak), serverOf(live)
 		switch {
 		case skipLabelMatches(bak, im.o.skipLabel):
 			im.keepCredentials(live)
@@ -329,8 +338,13 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 			moved = append(moved, bak.GetName()+": "+serverChange(liveServer, server))
 		}
 	}
+	for _, key := range im.liveKeys() {
+		if key.Kind == kindCluster.Kind && !inBackup[key] && skipLabelMatches(im.live[key], im.o.skipLabel) {
+			im.keepCredentials(im.live[key])
+		}
+	}
 	if len(moved) == 0 {
-		return nil
+		return im.checkHeldCredentials(objs)
 	}
 	return fmt.Errorf(`refusing to import: nothing was written.
 The backup points %d Cluster(s) at another server than the live Cluster of the same name, and a Cluster's server cannot change:
@@ -341,12 +355,77 @@ Credentials belong to one server, so choose before importing:
 		len(moved), strings.Join(moved, "\n  "))
 }
 
+// checkHeldCredentials refuses a Cluster the import would start reading a held Secret with, when the
+// live Cluster it is held for is at a server the backup does not use that Secret for: holding it
+// gives the new reader that server's credentials, and restoring it would give the backup's to the
+// Cluster that stays.
+func (im *importer) checkHeldCredentials(objs []*unstructured.Unstructured) error {
+	servers := map[resourceKey]map[string]bool{}
+	var readers []*unstructured.Unstructured
+	for _, bak := range objs {
+		secret, ok := credentialsKey(bak)
+		if bak.GetKind() != kindCluster.Kind || !ok {
+			continue
+		}
+		if servers[secret] == nil {
+			servers[secret] = map[string]bool{}
+		}
+		servers[secret][clusters.NormalizeServer(serverOf(bak))] = true
+		if im.startsReading(bak, secret) {
+			readers = append(readers, bak)
+		}
+	}
+	var crossed []string
+	for _, bak := range readers {
+		secret, _ := credentialsKey(bak)
+		for _, holder := range im.holders[secret] {
+			if !servers[secret][clusters.NormalizeServer(serverOf(holder))] {
+				crossed = append(crossed, fmt.Sprintf("%s: Secret %s is kept for %s at %s", bak.GetName(), secret.Name, holder.GetName(), printableServer(serverOf(holder))))
+				break
+			}
+		}
+	}
+	if len(crossed) == 0 {
+		return nil
+	}
+	return fmt.Errorf(`refusing to import: nothing was written.
+The backup would start %d Cluster(s) reading a Secret kept for a live Cluster at another server:
+  %s
+Credentials belong to one server, so give the live Cluster its own Secret, or leave the backup's Cluster out with --skip-resources-with-label, then re-run`,
+		len(crossed), strings.Join(crossed, "\n  "))
+}
+
+// startsReading reports whether the import writes bak, a Cluster of the backup, so that it reads a
+// Secret it does not read now.
+func (im *importer) startsReading(bak *unstructured.Unstructured, secret resourceKey) bool {
+	if _, kept := im.kept[keyOf(bak)]; kept || skipLabelMatches(bak, im.o.skipLabel) {
+		return false
+	}
+	live, ok := im.live[keyOf(bak)]
+	if !ok {
+		return true
+	}
+	current, _ := credentialsKey(live)
+	return current != secret
+}
+
 // keepCredentials holds the Secret a live Cluster reads, so the import neither writes nor prunes it.
 func (im *importer) keepCredentials(live *unstructured.Unstructured) {
-	if name, _, _ := unstructured.NestedString(live.Object, "spec", "config", "credentialsRef", "name"); name != "" {
-		k := resourceKey{Kind: "Secret", Namespace: live.GetNamespace(), Name: name}
-		im.kept[k] = "credentials of the live Cluster " + live.GetName()
+	if secret, ok := credentialsKey(live); ok {
+		im.kept[secret] = "credentials of the live Cluster " + live.GetName()
+		im.holders[secret] = append(im.holders[secret], live)
 	}
+}
+
+// credentialsKey returns the key of the Secret a Cluster reads, if it names one.
+func credentialsKey(cluster *unstructured.Unstructured) (resourceKey, bool) {
+	name, _, _ := unstructured.NestedString(cluster.Object, "spec", "config", "credentialsRef", "name")
+	return resourceKey{Kind: "Secret", Namespace: cluster.GetNamespace(), Name: name}, name != ""
+}
+
+func serverOf(cluster *unstructured.Unstructured) string {
+	server, _, _ := unstructured.NestedString(cluster.Object, "spec", "server")
+	return server
 }
 
 // serverChange names both servers of a Cluster for a message.
@@ -413,10 +492,12 @@ func (im *importer) loadLive(ctx context.Context, objs []*unstructured.Unstructu
 		}
 	}
 	// A Secret only a backup Cluster references exists all the same, for one once the Cluster was
-	// deleted to restore its server: creating it would fail.
+	// deleted to restore its server: creating it would fail. TLS Secrets stay out of this: they are
+	// the installation's, and a Cluster's credentials are not in that form.
+	backupRefs := map[string]bool{}
 	for _, obj := range objs {
 		if obj.GetKind() == kindCluster.Kind {
-			secretRefs(obj.Object["spec"], referenced)
+			secretRefs(obj.Object["spec"], backupRefs)
 		}
 	}
 	secrets, err := im.kc.dynamic.Resource(secretsGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
@@ -425,7 +506,8 @@ func (im *importer) loadLive(ctx context.Context, objs []*unstructured.Unstructu
 	}
 	for i := range secrets.Items {
 		sec := &secrets.Items[i]
-		if !isPatrolSecret(sec, referenced) {
+		secretType, _, _ := unstructured.NestedString(sec.Object, "type")
+		if !isPatrolSecret(sec, referenced) && (secretType == string(corev1.SecretTypeTLS) || !isPatrolSecret(sec, backupRefs)) {
 			continue
 		}
 		im.addLive(sec)
@@ -434,6 +516,15 @@ func (im *importer) loadLive(ctx context.Context, objs []*unstructured.Unstructu
 		}
 	}
 	return nil
+}
+
+// liveKeys returns the keys of the live objects in a stable order.
+func (im *importer) liveKeys() []resourceKey {
+	keys := slices.Collect(maps.Keys(im.live))
+	slices.SortFunc(keys, func(a, b resourceKey) int {
+		return strings.Compare(a.Kind+"/"+a.Namespace+"/"+a.Name, b.Kind+"/"+b.Namespace+"/"+b.Name)
+	})
+	return keys
 }
 
 func (im *importer) addLive(obj *unstructured.Unstructured) {
@@ -492,7 +583,11 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 		return false, nil
 	}
 	if reason, ok := im.kept[key]; ok {
-		_, _ = fmt.Fprintf(im.out, "%s/%s %s in namespace %s kept: %s%s\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), reason, im.dryRunMsg)
+		outcome := "kept"
+		if !exists {
+			outcome = "not restored"
+		}
+		_, _ = fmt.Fprintf(im.out, "%s/%s %s in namespace %s %s: %s%s\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), outcome, reason, im.dryRunMsg)
 		return false, nil
 	}
 	switch kind := bak.GetKind(); {
@@ -546,7 +641,7 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 		if !forbidden {
 			_, _ = fmt.Fprintf(im.out, "%s/%s %s in namespace %s created%s\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), im.dryRunMsg)
 		}
-	case specsEqual(bak, liveObj):
+	case specsEqual(bak, liveObj) && hasItsOwners(bak, liveObj):
 		if im.o.verbose {
 			_, _ = fmt.Fprintf(im.out, "%s/%s %s unchanged%s\n", gvk.Group, gvk.Kind, bak.GetName(), im.dryRunMsg)
 		}
@@ -715,6 +810,14 @@ func specsEqual(bak, live *unstructured.Unstructured) bool {
 	}
 }
 
+// hasItsOwners reports whether an object has the owners the backup gives it, resolved to this
+// cluster. The steps in import's help orphan a Secret that may match the backup, and without an owner
+// it would outlive the new Cluster.
+func hasItsOwners(bak, live *unstructured.Unstructured) bool {
+	refs := bak.GetOwnerReferences()
+	return len(refs) == 0 || jsonEqual(refs, live.GetOwnerReferences())
+}
+
 // updateLive returns live with the labels, annotations, finalizers, owner references and
 // data or spec of bak; status and other metadata stay as they are.
 func updateLive(bak, live *unstructured.Unstructured) *unstructured.Unstructured {
@@ -787,17 +890,8 @@ func (im *importer) stopOperations(ctx context.Context, apps []*unstructured.Uns
 
 // pruneRemaining deletes (with --prune) or reports the live objects not in the backup.
 func (im *importer) pruneRemaining(ctx context.Context) error {
-	keys := slices.Collect(maps.Keys(im.live))
-	slices.SortFunc(keys, func(a, b resourceKey) int {
-		return strings.Compare(a.Kind+"/"+a.Namespace+"/"+a.Name, b.Kind+"/"+b.Namespace+"/"+b.Name)
-	})
-	for _, key := range keys {
-		if key.Kind == kindCluster.Kind && skipLabelMatches(im.live[key], im.o.skipLabel) {
-			im.keepCredentials(im.live[key])
-		}
-	}
 	var prompt *bufio.Reader
-	for _, key := range keys {
+	for _, key := range im.liveKeys() {
 		liveObj := im.live[key]
 		if skipLabelMatches(liveObj, im.o.skipLabel) {
 			_, _ = fmt.Fprintf(im.out, "Skipping pruning of %s/%s %s in namespace %s\n", key.Group, key.Kind, key.Name, key.Namespace)
