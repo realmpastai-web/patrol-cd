@@ -1,7 +1,6 @@
 # internal/cli/admin (`patrol admin`). See docs/architecture/components/cli-admin.md.
 # Commands that talk to Kubernetes are tested against a real kube-apiserver (envtest 1.36) through
-# the cobra command tree; offline commands are tested with real inputs and no fakes. The command
-# group is not wired into cmd/patrol yet (CLI core workstream).
+# the cobra command tree; offline commands are tested with real inputs and no fakes.
 
 API-076:
   status: verified
@@ -10,7 +9,7 @@ API-076:
     - internal/cli/admin/misc_test.go:TestAdminHelpListsCommands
   notes: >-
     admin.Register(root, factory) adds the group with kubectl connection flags; --logformat and
-    --loglevel are accepted on admin itself as upstream. Not yet registered by cmd/patrol.
+    --loglevel are accepted on admin itself as upstream.
 
 API-077:
   status: verified
@@ -91,7 +90,10 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportHidesCredentialsInServers
     - internal/cli/admin/backup_test.go:TestImportDeletedClusterComesBackAndTheOtherIsKept
     - internal/cli/admin/backup_test.go:TestImportRefusesALiveClusterSwitchedToAHeldSecret
-    - internal/cli/admin/backup_test.go:TestImportRestoresASecretOfAClusterItPrunes
+    - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
@@ -330,21 +332,25 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportHidesCredentialsInServers
     - internal/cli/admin/backup_test.go:TestImportDeletedClusterComesBackAndTheOtherIsKept
     - internal/cli/admin/backup_test.go:TestImportRefusesALiveClusterSwitchedToAHeldSecret
-    - internal/cli/admin/backup_test.go:TestImportRestoresASecretOfAClusterItPrunes
+    - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
-  evidence: docs/verification/log.md#V-0057
+  evidence: docs/verification/log.md#V-0058
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
     writing and --keep-live-clusters keeps the live Cluster and its Secret. A Cluster skipped by
     --skip-resources-with-label is not refused and keeps the Secret it references, as upstream's
     label covers both, whether or not the backup holds that Cluster. A live Cluster the backup does
-    not hold keeps that Secret too, unless --prune removes it. A backup that would start another
-    Cluster reading a Secret held this way is refused too, unless the backup uses that Secret for
-    the server of the Cluster it is held for. An import gives an object the owners the backup names,
+    not hold keeps that Secret too, also under --prune, which comes after every write and may not
+    remove the Cluster; the next import restores a Secret whose Cluster is gone. A backup that would
+    start a Cluster reading a Secret held this way, or one it has no copy of, is refused too if a
+    live Cluster reads that Secret at a server the backup does not use it for. An import gives an object the owners the backup names,
     which upstream's update does not, and keeps the others, because two Cluster objects can own one
     Secret here.
 

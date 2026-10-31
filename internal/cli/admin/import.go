@@ -83,11 +83,12 @@ and is not refused. With --keep-live-clusters the live Cluster and the Secret it
 stay as they are, also under --prune, and the rest of the backup is restored. A Cluster
 skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too,
 whether or not the backup holds that Cluster. A live Cluster the backup does not hold keeps that
-Secret the same way, unless --prune removes the Cluster.
+Secret the same way, also under --prune, which comes after every write and may not remove the
+Cluster. The next import restores a Secret whose Cluster is gone.
 
-A Secret holds one server's credentials. A backup that would start another Cluster reading a
-Secret kept this way is refused the same way, unless the backup uses that Secret for the server
-of the Cluster it is kept for.
+A Secret holds one server's credentials. A backup that would start a Cluster reading a Secret
+kept this way, or a Secret it has no copy of, is refused the same way if a live Cluster reads
+that Secret at a server the backup does not use it for.
 
 Restoring a Cluster's server (the backup is right, the live Cluster is wrong):
   1. Note the replicas of the ApplicationSet controller, stop it and wait for its pods to go:
@@ -229,7 +230,7 @@ type importer struct {
 	// backupHasSecrets is false for a backup without Secrets (--include-secrets=false):
 	// live Secrets are then never pruned.
 	backupHasSecrets bool
-	// pruned are the objects pruned (or, in a dry run, that would be pruned) so far.
+	// pruned are the objects pruned (or, in a dry run or without --prune, that would be) so far.
 	pruned map[resourceKey]bool
 	// dryRunCreated are the objects a dry run would create, with resolved owner references.
 	dryRunCreated []*unstructured.Unstructured
@@ -240,7 +241,7 @@ type importer struct {
 	// kept are the backup objects not imported because the live Cluster they belong to points
 	// at another server, with the reason printed.
 	kept map[resourceKey]string
-	// holders holds, by Secret, the live Clusters a Secret in kept stays for.
+	// holders holds, by Secret, the live Clusters that go on reading what is in it now.
 	holders map[resourceKey][]*unstructured.Unstructured
 }
 
@@ -309,20 +310,20 @@ func (im *importer) warn(msg string) { im.f.logger().Warn(msg) }
 // written, because spec.server cannot change. The CRD compares stored text, and every other reader
 // compares clusters.NormalizeServer, so a difference of trailing slashes takes the live text. A real
 // difference is refused unless the operator chose the live server with --keep-live-clusters. A
-// Cluster that stays, by that flag, by the skip label or because the backup does not hold it and
-// --prune does not remove it, keeps the Secret it reads, because credentials belong to one server.
-// That has to be known before the first Secret is written.
+// Cluster that stays, by that flag, by the skip label or because the backup does not hold it, keeps
+// the Secret it reads, because credentials belong to one server. That has to be known before the
+// first Secret is written, and whether --prune removes a Cluster is known only after the last one.
 func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error {
 	var moved []string
 	inBackup := map[resourceKey]bool{}
 	for _, bak := range objs {
-		if bak.GetKind() != kindCluster.Kind {
-			continue
-		}
 		if bak.GetNamespace() == "" {
 			bak.SetNamespace(im.scope.controlPlane)
 		}
 		inBackup[keyOf(bak)] = true
+		if bak.GetKind() != kindCluster.Kind {
+			continue
+		}
 		live, ok := im.live[keyOf(bak)]
 		if !ok {
 			continue
@@ -343,8 +344,14 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		}
 	}
 	for _, key := range im.liveKeys() {
-		if key.Kind == kindCluster.Kind && !inBackup[key] && (!im.o.prune || skipLabelMatches(im.live[key], im.o.skipLabel)) {
-			im.keepCredentials(im.live[key])
+		if key.Kind != kindCluster.Kind {
+			continue
+		}
+		live := im.live[key]
+		if secret, ok := credentialsKey(live); !inBackup[key] {
+			im.keepCredentials(live)
+		} else if ok && !inBackup[secret] {
+			im.holders[secret] = append(im.holders[secret], live)
 		}
 	}
 	if len(moved) == 0 {
@@ -834,10 +841,13 @@ func hasItsOwners(bak, live *unstructured.Unstructured) bool {
 // have one, because the API refuses an object with two.
 func mergedOwners(refs, live []metav1.OwnerReference) []metav1.OwnerReference {
 	isController := func(r metav1.OwnerReference) bool { return r.Controller != nil && *r.Controller }
+	groupKind := func(r metav1.OwnerReference) schema.GroupKind {
+		return schema.FromAPIVersionAndKind(r.APIVersion, r.Kind).GroupKind()
+	}
 	merged := slices.Clone(refs)
 	controlled := slices.ContainsFunc(refs, isController)
 	for _, l := range live {
-		named := slices.ContainsFunc(refs, func(r metav1.OwnerReference) bool { return r.Kind == l.Kind && r.Name == l.Name })
+		named := slices.ContainsFunc(refs, func(r metav1.OwnerReference) bool { return groupKind(r) == groupKind(l) && r.Name == l.Name })
 		if !named && (!controlled || !isController(l)) {
 			merged = append(merged, l)
 		}
@@ -933,6 +943,7 @@ func (im *importer) pruneRemaining(ctx context.Context) error {
 			continue
 		}
 		if !im.o.prune {
+			im.pruned[key] = true
 			_, _ = fmt.Fprintf(im.out, "%s/%s %s needs pruning\n", key.Group, key.Kind, key.Name)
 			continue
 		}
@@ -991,7 +1002,7 @@ func (im *importer) secretKeptReason(key resourceKey) string {
 		return ""
 	}
 	switch {
-	case im.kept[key] != "":
+	case im.kept[key] != "" && slices.ContainsFunc(im.holders[key], func(c *unstructured.Unstructured) bool { return !im.pruned[keyOf(c)] }):
 		return im.kept[key]
 	case isRequiredSettingsSecret(key.Name):
 		return fmt.Sprintf("%s and %s are never pruned", settings.DefaultSecretName, settings.DefaultNotificationsSecretName)
