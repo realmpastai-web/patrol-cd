@@ -74,8 +74,12 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportKeepLiveClusters
     - internal/cli/admin/backup_test.go:TestImportKeptClusterKeepsItsSecretUnderPrune
     - internal/cli/admin/backup_test.go:TestImportSkippedMovedClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportSkippedClusterKeepsItsSecretAtTheSameServer
+    - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportUpdatesASecretOnlyTheBackupReferences
+    - internal/cli/admin/backup_test.go:TestImportNeverWritesAnInstallationSecretABackupReferences
     - internal/cli/admin/backup_test.go:TestImportClusterCheckRefusesOnlyAMovedCluster
-    - internal/cli/admin/backup_test.go:TestImportRefusalHidesCredentialsInServers
+    - internal/cli/admin/backup_test.go:TestImportHidesCredentialsInServers
     - internal/cli/admin/backup_test.go:TestImportDeletedClusterComesBackAndTheOtherIsKept
   notes: >-
     Prune differences from upstream (safety): Secrets are pruned only when the backup contains
@@ -294,14 +298,20 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportKeepLiveClusters
     - internal/cli/admin/backup_test.go:TestImportKeptClusterKeepsItsSecretUnderPrune
     - internal/cli/admin/backup_test.go:TestImportSkippedMovedClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportSkippedClusterKeepsItsSecretAtTheSameServer
+    - internal/cli/admin/backup_test.go:TestImportSkippedLiveClusterKeepsItsSecret
+    - internal/cli/admin/backup_test.go:TestImportUpdatesASecretOnlyTheBackupReferences
+    - internal/cli/admin/backup_test.go:TestImportNeverWritesAnInstallationSecretABackupReferences
     - internal/cli/admin/backup_test.go:TestImportClusterCheckRefusesOnlyAMovedCluster
-    - internal/cli/admin/backup_test.go:TestImportRefusalHidesCredentialsInServers
+    - internal/cli/admin/backup_test.go:TestImportHidesCredentialsInServers
     - internal/cli/admin/backup_test.go:TestImportDeletedClusterComesBackAndTheOtherIsKept
-  evidence: docs/verification/log.md#V-0054
+  evidence: docs/verification/log.md#V-0055
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
-    writing and --keep-live-clusters keeps the live Cluster and its Secret.
+    writing and --keep-live-clusters keeps the live Cluster and its Secret. A Cluster skipped by
+    --skip-resources-with-label is not refused and keeps the Secret it references, as upstream's
+    label covers both.
 
 NOTIF-104:
   status: verified

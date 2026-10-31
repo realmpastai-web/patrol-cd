@@ -78,7 +78,8 @@ A Cluster's server cannot change. A backup that points a Cluster at another serv
 live Cluster of the same name is refused before anything is written, with or without
 --dry-run, listing every such Cluster. A difference of trailing slashes is the same server
 and is not refused. With --keep-live-clusters the live Cluster and the Secret it references
-stay as they are, also under --prune, and the rest of the backup is restored.
+stay as they are, also under --prune, and the rest of the backup is restored. A Cluster
+skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too.
 
 Restoring a Cluster's server (the backup is right, the live Cluster is wrong):
   1. Note the replicas of the ApplicationSet controller, stop it and wait for its pods to go:
@@ -262,7 +263,7 @@ func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string
 	if o.dryRun {
 		im.dryRunMsg = " (dry run)"
 	}
-	if err := im.loadLive(ctx); err != nil {
+	if err := im.loadLive(ctx, objs); err != nil {
 		return err
 	}
 	if err := im.checkClusterServers(objs); err != nil {
@@ -296,8 +297,8 @@ func (im *importer) warn(msg string) { im.f.logger().Warn(msg) }
 // checkClusterServers compares the Clusters of the backup with the live ones before anything is
 // written, because spec.server cannot change. The CRD compares stored text, and every other reader
 // compares clusters.NormalizeServer, so a difference of trailing slashes takes the live text. A real
-// difference is refused unless the operator chose the live server, by --keep-live-clusters or by
-// skipping that Cluster; the credentials Secret of a Cluster that stays stays with it, because
+// difference is refused unless the operator chose the live server with --keep-live-clusters. A
+// Cluster that stays, by that flag or by the skip label, keeps the Secret it reads, because
 // credentials belong to one server.
 func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error {
 	var moved []string
@@ -315,18 +316,17 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		server, _, _ := unstructured.NestedString(bak.Object, "spec", "server")
 		liveServer, _, _ := unstructured.NestedString(live.Object, "spec", "server")
 		switch {
+		case skipLabelMatches(bak, im.o.skipLabel):
+			im.keepCredentials(live)
 		case clusters.NormalizeServer(server) == clusters.NormalizeServer(liveServer):
 			if err := unstructured.SetNestedField(bak.Object, liveServer, "spec", "server"); err != nil {
 				return err
 			}
-		case im.o.keepLiveClusters || skipLabelMatches(bak, im.o.skipLabel):
-			im.kept[keyOf(bak)] = fmt.Sprintf("live server %s, backup %s", printableServer(liveServer), printableServer(server))
-			if name, _, _ := unstructured.NestedString(live.Object, "spec", "config", "credentialsRef", "name"); name != "" {
-				k := resourceKey{Kind: "Secret", Namespace: bak.GetNamespace(), Name: name}
-				im.kept[k] = "credentials of the live Cluster " + bak.GetName()
-			}
+		case im.o.keepLiveClusters:
+			im.kept[keyOf(bak)] = serverChange(liveServer, server)
+			im.keepCredentials(live)
 		default:
-			moved = append(moved, fmt.Sprintf("%s: live %s, backup %s", bak.GetName(), printableServer(liveServer), printableServer(server)))
+			moved = append(moved, bak.GetName()+": "+serverChange(liveServer, server))
 		}
 	}
 	if len(moved) == 0 {
@@ -339,6 +339,23 @@ Credentials belong to one server, so choose before importing:
   - If the live server is right, re-run with --keep-live-clusters. The live Cluster and its credentials Secret stay as they are and everything else is restored. Applications using destination.name deploy to the live server; those using the backup's destination.server report InvalidSpecError.
   - If the backup's server is right, do not just delete the Cluster: ApplicationSets would delete its Applications. Follow "Restoring a Cluster's server" in 'patrol admin import --help', then re-run`,
 		len(moved), strings.Join(moved, "\n  "))
+}
+
+// keepCredentials holds the Secret a live Cluster reads, so the import neither writes nor prunes it.
+func (im *importer) keepCredentials(live *unstructured.Unstructured) {
+	if name, _, _ := unstructured.NestedString(live.Object, "spec", "config", "credentialsRef", "name"); name != "" {
+		k := resourceKey{Kind: "Secret", Namespace: live.GetNamespace(), Name: name}
+		im.kept[k] = "credentials of the live Cluster " + live.GetName()
+	}
+}
+
+// serverChange names both servers of a Cluster for a message.
+func serverChange(live, backup string) string {
+	l, b := printableServer(live), printableServer(backup)
+	if l == b {
+		return fmt.Sprintf("live %s, backup %s, which differ only in parts not shown", l, b)
+	}
+	return fmt.Sprintf("live %s, backup %s", l, b)
 }
 
 // printableServer drops what can hold a credential from a server URL for a message: the API
@@ -363,7 +380,7 @@ func containsSecrets(objs []*unstructured.Unstructured) bool {
 
 // loadLive lists the live objects a backup describes: the settings ConfigMaps, the Patrol
 // objects of the enabled namespaces and the Patrol Secrets of the control-plane namespace.
-func (im *importer) loadLive(ctx context.Context) error {
+func (im *importer) loadLive(ctx context.Context, objs []*unstructured.Unstructured) error {
 	ns := im.scope.controlPlane
 	cms, err := im.kc.dynamic.Resource(configMapsGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -393,6 +410,13 @@ func (im *importer) loadLive(ctx context.Context) error {
 			if k != kindApplication && k != kindAppProject && obj.GetNamespace() == ns {
 				secretRefs(obj.Object["spec"], referenced)
 			}
+		}
+	}
+	// A Secret only a backup Cluster references exists all the same, for one once the Cluster was
+	// deleted to restore its server: creating it would fail.
+	for _, obj := range objs {
+		if obj.GetKind() == kindCluster.Kind {
+			secretRefs(obj.Object["spec"], referenced)
 		}
 	}
 	secrets, err := im.kc.dynamic.Resource(secretsGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
@@ -767,6 +791,11 @@ func (im *importer) pruneRemaining(ctx context.Context) error {
 	slices.SortFunc(keys, func(a, b resourceKey) int {
 		return strings.Compare(a.Kind+"/"+a.Namespace+"/"+a.Name, b.Kind+"/"+b.Namespace+"/"+b.Name)
 	})
+	for _, key := range keys {
+		if key.Kind == kindCluster.Kind && skipLabelMatches(im.live[key], im.o.skipLabel) {
+			im.keepCredentials(im.live[key])
+		}
+	}
 	var prompt *bufio.Reader
 	for _, key := range keys {
 		liveObj := im.live[key]
