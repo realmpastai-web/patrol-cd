@@ -67,7 +67,9 @@ from it (owner reference removed) before it is deleted.
 
 Owner references are re-pointed to the UID of the owner in this cluster (owners are
 imported first); an owner reference whose owner does not exist is removed, because the
-garbage collector would otherwise delete the object.
+garbage collector would otherwise delete the object. An object that lacks an owner the backup
+gives it is updated even if it otherwise matches. Owners the backup does not name stay, because
+they may need the object too, unless both are the controller of the object: it can have only one.
 
 Objects of another Patrol CD API group (for example a backup taken before the API group
 was renamed) are refused unless --migrate-group is given; Argo CD objects (argoproj.io) are
@@ -80,7 +82,8 @@ live Cluster of the same name is refused before anything is written, with or wit
 and is not refused. With --keep-live-clusters the live Cluster and the Secret it references
 stay as they are, also under --prune, and the rest of the backup is restored. A Cluster
 skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too,
-whether or not the backup holds that Cluster.
+whether or not the backup holds that Cluster. A live Cluster the backup does not hold keeps that
+Secret the same way, unless --prune removes the Cluster.
 
 A Secret holds one server's credentials. A backup that would start another Cluster reading a
 Secret kept this way is refused the same way, unless the backup uses that Secret for the server
@@ -306,8 +309,9 @@ func (im *importer) warn(msg string) { im.f.logger().Warn(msg) }
 // written, because spec.server cannot change. The CRD compares stored text, and every other reader
 // compares clusters.NormalizeServer, so a difference of trailing slashes takes the live text. A real
 // difference is refused unless the operator chose the live server with --keep-live-clusters. A
-// Cluster that stays, by that flag or by the skip label, keeps the Secret it reads, because
-// credentials belong to one server. That has to be known before the first Secret is written.
+// Cluster that stays, by that flag, by the skip label or because the backup does not hold it and
+// --prune does not remove it, keeps the Secret it reads, because credentials belong to one server.
+// That has to be known before the first Secret is written.
 func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error {
 	var moved []string
 	inBackup := map[resourceKey]bool{}
@@ -339,7 +343,7 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		}
 	}
 	for _, key := range im.liveKeys() {
-		if key.Kind == kindCluster.Kind && !inBackup[key] && skipLabelMatches(im.live[key], im.o.skipLabel) {
+		if key.Kind == kindCluster.Kind && !inBackup[key] && (!im.o.prune || skipLabelMatches(im.live[key], im.o.skipLabel)) {
 			im.keepCredentials(im.live[key])
 		}
 	}
@@ -438,10 +442,11 @@ func serverChange(live, backup string) string {
 }
 
 // printableServer drops what can hold a credential from a server URL for a message: the API
-// refuses such a server, the CRD does not.
+// refuses such a server, the CRD does not. Text that only looks like a URL prints as invalid,
+// because whatever comes before its first colon parses as the scheme.
 func printableServer(server string) string {
 	u, err := url.Parse(server)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return "(invalid URL)"
 	}
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
@@ -810,23 +815,45 @@ func specsEqual(bak, live *unstructured.Unstructured) bool {
 	}
 }
 
-// hasItsOwners reports whether an object has the owners the backup gives it, resolved to this
+// hasItsOwners reports whether an object has every owner the backup gives it, resolved to this
 // cluster. The steps in import's help orphan a Secret that may match the backup, and without an owner
-// it would outlive the new Cluster.
+// it would outlive the new Cluster. Other owners are no difference: see mergedOwners.
 func hasItsOwners(bak, live *unstructured.Unstructured) bool {
-	refs := bak.GetOwnerReferences()
-	return len(refs) == 0 || jsonEqual(refs, live.GetOwnerReferences())
+	liveRefs := live.GetOwnerReferences()
+	for _, ref := range bak.GetOwnerReferences() {
+		if !slices.ContainsFunc(liveRefs, func(l metav1.OwnerReference) bool { return l.UID == ref.UID }) {
+			return false
+		}
+	}
+	return true
 }
 
-// updateLive returns live with the labels, annotations, finalizers, owner references and
-// data or spec of bak; status and other metadata stay as they are.
+// mergedOwners returns refs with the live owners they do not name: a Secret read by two Clusters is
+// owned by both, and dropping one lets the garbage collector delete it with the other. Kind and name
+// identify an owner, so a live reference at an old UID is replaced. A live controller goes when refs
+// have one, because the API refuses an object with two.
+func mergedOwners(refs, live []metav1.OwnerReference) []metav1.OwnerReference {
+	isController := func(r metav1.OwnerReference) bool { return r.Controller != nil && *r.Controller }
+	merged := slices.Clone(refs)
+	controlled := slices.ContainsFunc(refs, isController)
+	for _, l := range live {
+		named := slices.ContainsFunc(refs, func(r metav1.OwnerReference) bool { return r.Kind == l.Kind && r.Name == l.Name })
+		if !named && (!controlled || !isController(l)) {
+			merged = append(merged, l)
+		}
+	}
+	return merged
+}
+
+// updateLive returns live with the labels, annotations, finalizers and data or spec of bak, and
+// the owners of both; status and other metadata stay as they are.
 func updateLive(bak, live *unstructured.Unstructured) *unstructured.Unstructured {
 	newLive := live.DeepCopy()
 	newLive.SetAnnotations(bak.GetAnnotations())
 	newLive.SetLabels(bak.GetLabels())
 	newLive.SetFinalizers(bak.GetFinalizers())
 	if refs := bak.GetOwnerReferences(); len(refs) > 0 {
-		newLive.SetOwnerReferences(refs)
+		newLive.SetOwnerReferences(mergedOwners(refs, live.GetOwnerReferences()))
 	}
 	switch live.GetKind() {
 	case "ConfigMap":
