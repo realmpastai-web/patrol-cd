@@ -60,7 +60,8 @@ not in the backup are reported as "needs pruning". Settings ConfigMaps, patrol-s
 patrol-notifications-secret are never pruned. Secrets are pruned only when the backup
 contains Secrets (a backup exported with --include-secrets=false prunes none), and only
 Secrets managed by Patrol CD (label cd.patrol.example/secret-type or annotation
-cd.patrol.example/managed-by: patrol-cd); Secrets that are only referenced are kept.
+cd.patrol.example/managed-by: patrol-cd); Secrets that are only referenced are kept. A Secret a
+Cluster reads after the import is never pruned.
 Pruning never cascades: Applications lose their finalizers first, and objects owned by a
 pruned ApplicationSet, Repository, RepositoryCredential, Cluster or SCMProvider are released
 from it (owner reference removed) before it is deleted.
@@ -242,7 +243,8 @@ type importer struct {
 	// kept are the backup objects not imported because the live Cluster they belong to points
 	// at another server, with the reason printed.
 	kept map[resourceKey]string
-	// holders holds, by Secret, the live Clusters that go on reading what is in it now.
+	// holders holds, by Secret, the Clusters that read it after the import: the ones it keeps, known
+	// before the first write, and the ones it writes, known by the prune.
 	holders map[resourceKey][]*unstructured.Unstructured
 }
 
@@ -347,6 +349,7 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 			moved = append(moved, bak.GetName()+": "+serverChange(liveServer, server))
 		}
 	}
+	unrestored := map[resourceKey][]*unstructured.Unstructured{}
 	for _, key := range im.liveKeys() {
 		if key.Kind != kindCluster.Kind {
 			continue
@@ -355,11 +358,11 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		if secret, ok := credentialsKey(live); !inBackup[key] {
 			im.keepCredentials(live)
 		} else if ok && !inBackup[secret] {
-			im.holders[secret] = append(im.holders[secret], live)
+			unrestored[secret] = append(unrestored[secret], live)
 		}
 	}
 	if len(moved) == 0 {
-		return im.checkHeldCredentials(objs)
+		return im.checkHeldCredentials(objs, unrestored)
 	}
 	return fmt.Errorf(`refusing to import: nothing was written.
 The backup points %d Cluster(s) at another server than the live Cluster of the same name, and a Cluster's server cannot change:
@@ -373,8 +376,9 @@ Credentials belong to one server, so choose before importing:
 // checkHeldCredentials refuses a Cluster the import would start reading a held Secret with, when the
 // live Cluster it is held for is at a server the backup does not use that Secret for: holding it
 // gives the new reader that server's credentials, and restoring it would give the backup's to the
-// Cluster that stays.
-func (im *importer) checkHeldCredentials(objs []*unstructured.Unstructured) error {
+// Cluster that stays. A Secret the import does not restore is the same to a new reader, so unrestored
+// adds the live Clusters that read one, even if the import moves them off it.
+func (im *importer) checkHeldCredentials(objs []*unstructured.Unstructured, unrestored map[resourceKey][]*unstructured.Unstructured) error {
 	servers := map[resourceKey]map[string]bool{}
 	var readers []*unstructured.Unstructured
 	for _, bak := range objs {
@@ -393,7 +397,7 @@ func (im *importer) checkHeldCredentials(objs []*unstructured.Unstructured) erro
 	var crossed []string
 	for _, bak := range readers {
 		secret, _ := credentialsKey(bak)
-		for _, holder := range im.holders[secret] {
+		for _, holder := range slices.Concat(im.holders[secret], unrestored[secret]) {
 			if !servers[secret][clusters.NormalizeServer(serverOf(holder))] {
 				crossed = append(crossed, fmt.Sprintf("%s: Secret %s is kept for %s at %s", bak.GetName(), secret.Name, holder.GetName(), printableServer(serverOf(holder))))
 				break
@@ -628,6 +632,9 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 			im.warn(fmt.Sprintf("%s/%s %s: namespace %s is not the control-plane namespace %s; skipped", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), im.scope.controlPlane))
 			return false, nil
 		}
+	}
+	if secret, ok := credentialsKey(bak); ok && bak.GetKind() == kindCluster.Kind {
+		im.holders[secret] = append(im.holders[secret], bak)
 	}
 	if im.o.ignoreTracking && exists {
 		keepTracking(bak, liveObj, im.instanceLabel)
@@ -1012,7 +1019,7 @@ func (im *importer) secretKeptReason(key resourceKey) string {
 	}
 	stays := slices.IndexFunc(im.holders[key], func(c *unstructured.Unstructured) bool { return !im.pruned[keyOf(c)] })
 	switch {
-	case im.kept[key] != "" && stays >= 0:
+	case stays >= 0:
 		return credentialsOf(im.holders[key][stays])
 	case isRequiredSettingsSecret(key.Name):
 		return fmt.Sprintf("%s and %s are never pruned", settings.DefaultSecretName, settings.DefaultNotificationsSecretName)

@@ -93,6 +93,9 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportPrunesASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportKeepsASecretAClusterOfTheBackupReads
+    - internal/cli/admin/backup_test.go:TestImportDoesNotPruneAnUnmanagedSecretOnlyTheBackupReferences
     - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
@@ -107,8 +110,8 @@ API-080:
     isArgoCDSecret rule; referenced-only Secrets are exported and restored but never pruned),
     patrol-secret and patrol-notifications-secret are never pruned, and objects owned by a
     pruned ApplicationSet/Repository/RepositoryCredential/Cluster/SCMProvider are released
-    (owner reference removed) before the owner is deleted, so nothing cascades. A Secret a live
-    Cluster that stays reads is not pruned. OPS-143 records how an import treats a backup that moves
+    (owner reference removed) before the owner is deleted, so nothing cascades. A Secret a Cluster
+    reads after the import is not pruned. OPS-143 records how an import treats a backup that moves
     a live Cluster, with its evidence.
 
 API-081:
@@ -340,6 +343,9 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportPrunesASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportKeepsASecretAClusterOfTheBackupReads
+    - internal/cli/admin/backup_test.go:TestImportDoesNotPruneAnUnmanagedSecretOnlyTheBackupReferences
     - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
@@ -348,7 +354,7 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
-  evidence: docs/verification/log.md#V-0059
+  evidence: docs/verification/log.md#V-0060
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
