@@ -5,15 +5,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 const examplesDir = "../../../examples"
@@ -339,22 +342,30 @@ func isObject(kind, name string) func(*unstructured.Unstructured) bool {
 	return func(o *unstructured.Unstructured) bool { return o.GetKind() == kind && o.GetName() == name }
 }
 
-// A Secret stays while any Cluster that reads it does.
+// A Secret stays while any Cluster that reads it does, and the import names that Cluster.
 func TestImportKeepsASecretAPrunedClusterShares(t *testing.T) {
-	ctx := requireEnv(t)
-	ns := newNamespace(t, ctx, "prune-shared")
-	seedPatrol(t, ctx, ns)
-	tio := newTestIO(ns)
-	backup := exportBackup(t, ctx, tio)
-	const secret = "cluster-since-backup"
-	createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
-	createLiveCluster(t, ctx, ns, "a-pruned", greenServer, secret, nil)
-	createLiveCluster(t, ctx, ns, "z-stays", greenServer, secret, skipMe)
+	for name, tc := range map[string]struct{ pruned, stays string }{
+		"the pruned Cluster comes first": {pruned: "a-pruned", stays: "z-stays"},
+		"the pruned Cluster comes last":  {pruned: "z-pruned", stays: "a-stays"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := requireEnv(t)
+			ns := newNamespace(t, ctx, "prune-shared")
+			seedPatrol(t, ctx, ns)
+			tio := newTestIO(ns)
+			backup := exportBackup(t, ctx, tio)
+			const secret = "cluster-since-backup"
+			createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
+			createLiveCluster(t, ctx, ns, tc.pruned, greenServer, secret, nil)
+			createLiveCluster(t, ctx, ns, tc.stays, greenServer, secret, skipMe)
 
-	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", "--skip-resources-with-label", "skipme=true", backup))
-	assert.False(t, clusterExists(t, ctx, ns, "a-pruned"))
-	assert.True(t, clusterExists(t, ctx, ns, "z-stays"))
-	assert.Equal(t, greenToken, liveToken(t, ctx, ns, secret))
+			require.NoError(t, tio.run(ctx, "admin", "import", "--prune", "--skip-resources-with-label", "skipme=true", backup))
+			assert.False(t, clusterExists(t, ctx, ns, tc.pruned))
+			assert.True(t, clusterExists(t, ctx, ns, tc.stays))
+			assert.Equal(t, greenToken, liveToken(t, ctx, ns, secret))
+			assert.Contains(t, tio.out.String(), "/Secret "+secret+" is not in the backup; not pruned: credentials of the live Cluster "+tc.stays+"\n")
+		})
+	}
 }
 
 // Regression: "import --prune" of a backup exported with --include-secrets=false deleted
@@ -686,6 +697,26 @@ func editBackup(t *testing.T, path, from, to string) {
 	require.NoError(t, os.WriteFile(path, []byte(strings.ReplaceAll(string(data), from, to)), 0o600))
 }
 
+// labelBackupCluster adds a label to a Cluster of the backup at path, next to the ones it has.
+func labelBackupCluster(t *testing.T, path, name, label string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	objs, err := splitObjects(data)
+	require.NoError(t, err)
+	var buf strings.Builder
+	labelled := 0
+	for _, o := range objs {
+		if isObject(kindCluster.Kind, name)(o) {
+			require.NoError(t, unstructured.SetNestedField(o.Object, "true", "metadata", "labels", label))
+			labelled++
+		}
+		require.NoError(t, writeBackupObject(&buf, o))
+	}
+	require.Equal(t, 1, labelled, "the backup contains the Cluster")
+	require.NoError(t, os.WriteFile(path, []byte(buf.String()), 0o600))
+}
+
 func clusterObjects(ns string) dynamic.ResourceInterface {
 	return envDyn.Resource(kindCluster.gvr(currentGroup)).Namespace(ns)
 }
@@ -712,6 +743,16 @@ func moveEdgeLab(t *testing.T, ctx contextT, ns string) {
 	t.Helper()
 	repointCluster(t, ctx, ns, "edge-lab", greenServer, edgeLabSecret)
 	setToken(t, ctx, ns, edgeLabSecret, greenToken)
+}
+
+// skipSecret gives a live Secret the label, so a backup taken now skips its copy.
+func skipSecret(t *testing.T, ctx contextT, ns, secret string) {
+	t.Helper()
+	sec, err := envKube.CoreV1().Secrets(ns).Get(ctx, secret, metav1.GetOptions{})
+	require.NoError(t, err)
+	metav1.SetMetaDataLabel(&sec.ObjectMeta, "skipme", "true")
+	_, err = envKube.CoreV1().Secrets(ns).Update(ctx, sec, metav1.UpdateOptions{})
+	require.NoError(t, err)
 }
 
 func setToken(t *testing.T, ctx contextT, ns, secret, token string) {
@@ -871,7 +912,7 @@ func TestImportKeepsTheStoredServerWhenOnlySlashesDiffer(t *testing.T) {
 			}
 			assert.Equal(t, tc.live, liveServer(t, ctx, ns, "edge-lab"))
 
-			editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {restored: \"true\"}\nspec:")
+			labelBackupCluster(t, backup, "edge-lab", "restored")
 			for _, args := range [][]string{{"--dry-run"}, nil} {
 				tio.out.Reset()
 				require.NoError(t, tio.run(ctx, append([]string{"admin", "import", backup}, args...)...))
@@ -943,7 +984,7 @@ func TestImportKeptClusterKeepsItsSecretUnderPrune(t *testing.T) {
 			seedPatrol(t, ctx, ns)
 			tio := newTestIO(ns)
 			backup := exportBackup(t, ctx, tio)
-			editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {skipme: \"true\"}\nspec:")
+			labelBackupCluster(t, backup, "edge-lab", "skipme")
 			moveEdgeLabToAnotherSecret(t, ctx, ns, secret)
 
 			for _, mode := range [][]string{{"--dry-run"}, nil} {
@@ -966,7 +1007,7 @@ func TestImportSkippedMovedClusterKeepsItsSecret(t *testing.T) {
 	seedPatrol(t, ctx, ns)
 	tio := newTestIO(ns)
 	backup := exportBackup(t, ctx, tio)
-	editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {skipme: \"true\"}\nspec:")
+	labelBackupCluster(t, backup, "edge-lab", "skipme")
 	moveEdgeLab(t, ctx, ns)
 
 	tio.out.Reset()
@@ -985,7 +1026,7 @@ func TestImportSkippedClusterKeepsItsSecretAtTheSameServer(t *testing.T) {
 	seedPatrol(t, ctx, ns)
 	tio := newTestIO(ns)
 	backup := exportBackup(t, ctx, tio)
-	editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {skipme: \"true\"}\nspec:")
+	labelBackupCluster(t, backup, "edge-lab", "skipme")
 
 	setToken(t, ctx, ns, edgeLabSecret, greenToken)
 	require.NoError(t, tio.run(ctx, "admin", "import", "--skip-resources-with-label", "skipme=true", backup))
@@ -1096,6 +1137,19 @@ func TestImportRefusesACrossedHeldSecret(t *testing.T) {
 			},
 			reader: "edge-lab", holder: "prod-us", shown: "https://prod-us.example.com",
 		},
+		"the backup skips its copy, and puts the live Cluster on another Secret": {
+			args: []string{"--skip-resources-with-label", "skipme=true"},
+			seed: func(t *testing.T, ctx contextT, ns string) {
+				skipSecret(t, ctx, ns, edgeLabSecret)
+				repointCluster(t, ctx, ns, "prod-us", "https://prod-us.example.com", "cluster-prod-us")
+			},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+				repointCluster(t, ctx, ns, "prod-us", "https://prod-us.example.com", edgeLabSecret)
+				setToken(t, ctx, ns, edgeLabSecret, greenToken)
+			},
+			reader: "edge-lab", holder: "prod-us", shown: "https://prod-us.example.com",
+		},
 		"held for two Clusters, only the second at another server": {
 			args: []string{"--skip-resources-with-label", "skipme=true"},
 			arrive: func(t *testing.T, ctx contextT, ns string) {
@@ -1154,13 +1208,41 @@ func TestImportRefusesACrossedHeldSecret(t *testing.T) {
 			assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
 
 			// Leaving the new reader out is the way through, whichever Cluster the Secret stays for.
-			editBackup(t, backup, "name: "+tc.reader+"\nspec:", "name: "+tc.reader+"\n  labels: {skipme: \"true\"}\nspec:")
+			labelBackupCluster(t, backup, tc.reader, "skipme")
 			require.NoError(t, tio.run(ctx, append([]string{"admin", "import", "--skip-resources-with-label", "skipme=true", backup}, tc.args...)...))
 			assert.True(t, repositoryExists(t, ctx, ns, "repo-managed"))
 			assert.False(t, clusterExists(t, ctx, ns, tc.reader))
 			assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
 		})
 	}
+}
+
+// A refusal lists every Cluster it is about, and a moved Cluster comes first, so --help's "listing
+// every such Cluster" holds whatever else the backup would do.
+func TestImportListsEveryCrossedCluster(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "crossed-all")
+	seedPatrol(t, ctx, ns)
+	createLiveCluster(t, ctx, ns, "second-reader", "https://second.example.com", edgeLabSecret, nil)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+	require.NoError(t, clusterObjects(ns).Delete(ctx, "second-reader", metav1.DeleteOptions{}))
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, edgeLabSecret, nil)
+
+	err := tio.run(ctx, "admin", "import", backup)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "would start 2 Cluster(s) reading")
+	for _, reader := range []string{"edge-lab", "second-reader"} {
+		assert.Contains(t, err.Error(), reader+": Secret "+edgeLabSecret+" is kept for since-backup at "+greenServer+"\n")
+	}
+
+	repointCluster(t, ctx, ns, "prod-us", "https://moved.example.com", "cluster-prod-us")
+	err = tio.run(ctx, "admin", "import", backup)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "points 1 Cluster(s) at another server")
+	assert.Contains(t, err.Error(), "prod-us: live https://moved.example.com")
+	assert.NotContains(t, err.Error(), "would start")
 }
 
 // A Cluster that stays at its server is a new reader of a Secret the backup would switch it to.
@@ -1224,6 +1306,69 @@ func TestImportKeepsTheSecretOfAClusterThePromptKeeps(t *testing.T) {
 	assert.Equal(t, greenToken, liveToken(t, ctx, ns, edgeLabSecret))
 }
 
+// A Secret the backup lacks goes with its Cluster only: declining that prune leaves nothing to
+// offer for pruning, whatever the next answer would be.
+func TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "prune-declined-lacks")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	const secret = "cluster-since-backup"
+	createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, secret, nil)
+
+	tio.f.In = strings.NewReader("n\ny\n")
+	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", "--prompts-enabled", backup))
+	assert.True(t, clusterExists(t, ctx, ns, "since-backup"))
+	assert.Equal(t, greenToken, liveToken(t, ctx, ns, secret))
+	assert.Contains(t, tio.out.String(), "/Secret "+secret+" is not in the backup; not pruned: credentials of the live Cluster since-backup\n")
+}
+
+// A delete can be refused, and a Cluster that stays still reads its Secret.
+func TestImportKeepsTheSecretOfAClusterItMayNotDelete(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "prune-forbidden")
+	seedPatrol(t, ctx, ns)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	const secret = "cluster-since-backup"
+	createClusterSecret(t, ctx, ns, secret, greenToken, map[string]any{"cd.patrol.example/secret-type": "cluster"})
+	createLiveCluster(t, ctx, ns, "since-backup", greenServer, secret, nil)
+
+	const user = "no-cluster-delete"
+	everything := []string{"*"}
+	_, err := envKube.RbacV1().Roles(ns).Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: user},
+		Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{""}, Resources: []string{"secrets", "configmaps"}, Verbs: everything},
+			{APIGroups: []string{currentGroup}, Resources: []string{"applications", "appprojects", "applicationsets", "repositories", "repositorycredentials", "scmproviders", "operations"}, Verbs: everything},
+			{APIGroups: []string{currentGroup}, Resources: []string{"clusters"}, Verbs: []string{"get", "list", "create", "update", "patch"}},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = envKube.RbacV1().RoleBindings(ns).Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: user},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: user},
+		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: user}},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	limited := rest.CopyConfig(envCfg)
+	limited.Impersonate = rest.ImpersonationConfig{UserName: user}
+	tio.f.RESTConfig = func() (*rest.Config, string, error) { return rest.CopyConfig(limited), ns, nil }
+	impersonated, err := dynamic.NewForConfig(limited)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := impersonated.Resource(kindCluster.gvr(currentGroup)).Namespace(ns).List(ctx, metav1.ListOptions{})
+		return err == nil
+	}, 30*time.Second, 100*time.Millisecond, "the role takes effect")
+
+	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", backup))
+	assert.True(t, clusterExists(t, ctx, ns, "since-backup"))
+	assert.Equal(t, greenToken, liveToken(t, ctx, ns, secret))
+	assert.Contains(t, tio.out.String(), "/Secret "+secret+" is not in the backup; not pruned: credentials of the live Cluster since-backup\n")
+}
+
 // The backup's copy of a Secret is the backup's to write once nothing that stays reads it, even if
 // a live Cluster the import moves to another Secret reads it now.
 func TestImportRestoresASecretALiveClusterMovesOff(t *testing.T) {
@@ -1266,6 +1411,17 @@ func TestImportAllowsAHeldSecretThatDoesNotCross(t *testing.T) {
 		"the backup has no copy, and puts the live Cluster at that server on another Secret": {
 			export: []string{"--include-secrets=false"},
 			seed: func(t *testing.T, ctx contextT, ns string) {
+				repointCluster(t, ctx, ns, "prod-us", edgeLabServer, "cluster-prod-us")
+			},
+			arrive: func(t *testing.T, ctx contextT, ns string) {
+				require.NoError(t, clusterObjects(ns).Delete(ctx, "edge-lab", metav1.DeleteOptions{}))
+				repointCluster(t, ctx, ns, "prod-us", edgeLabServer, edgeLabSecret)
+			},
+			created: edgeLabServer,
+		},
+		"the backup skips its copy, and puts the live Cluster at that server on another Secret": {
+			seed: func(t *testing.T, ctx contextT, ns string) {
+				skipSecret(t, ctx, ns, edgeLabSecret)
 				repointCluster(t, ctx, ns, "prod-us", edgeLabServer, "cluster-prod-us")
 			},
 			arrive: func(t *testing.T, ctx contextT, ns string) {
@@ -1369,6 +1525,10 @@ func TestImportPrunesTheSecretOfAPrunedCluster(t *testing.T) {
 	require.NoError(t, tio.run(ctx, "admin", "import", backup))
 	assert.Contains(t, tio.out.String(), "/Secret "+secret+" needs pruning\n")
 
+	require.NoError(t, tio.run(ctx, "admin", "import", "--dry-run", "--prune", backup))
+	assert.Contains(t, tio.out.String(), "/Secret "+secret+" pruned (dry run)\n")
+	assert.True(t, clusterExists(t, ctx, ns, "since-backup"))
+
 	require.NoError(t, tio.run(ctx, "admin", "import", "--prune", backup))
 	assert.False(t, clusterExists(t, ctx, ns, "since-backup"))
 	_, err := envKube.CoreV1().Secrets(ns).Get(ctx, secret, metav1.GetOptions{})
@@ -1383,7 +1543,7 @@ func TestImportSaysAHeldSecretWasNotRestored(t *testing.T) {
 	seedPatrol(t, ctx, ns)
 	tio := newTestIO(ns)
 	backup := exportBackup(t, ctx, tio)
-	editBackup(t, backup, "name: edge-lab\nspec:", "name: edge-lab\n  labels: {skipme: \"true\"}\nspec:")
+	labelBackupCluster(t, backup, "edge-lab", "skipme")
 	moveEdgeLab(t, ctx, ns)
 	require.NoError(t, envKube.CoreV1().Secrets(ns).Delete(ctx, edgeLabSecret, metav1.DeleteOptions{}))
 

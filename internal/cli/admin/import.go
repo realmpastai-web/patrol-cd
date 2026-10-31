@@ -83,12 +83,13 @@ and is not refused. With --keep-live-clusters the live Cluster and the Secret it
 stay as they are, also under --prune, and the rest of the backup is restored. A Cluster
 skipped by --skip-resources-with-label is not refused, and keeps the Secret it references too,
 whether or not the backup holds that Cluster. A live Cluster the backup does not hold keeps that
-Secret the same way, also under --prune, which comes after every write and may not remove the
-Cluster. The next import restores a Secret whose Cluster is gone.
+Secret the same way until --prune removes it. --prune comes after every write, so the next import
+restores a Secret of the backup whose Cluster is gone, and a Secret the backup does not hold can be
+pruned with its Cluster.
 
 A Secret holds one server's credentials. A backup that would start a Cluster reading a Secret
-kept this way, or a Secret it has no copy of, is refused the same way if a live Cluster reads
-that Secret at a server the backup does not use it for.
+kept this way, or a Secret it has no copy of or skips, is refused the same way if a live Cluster
+reads that Secret at a server the backup does not use it for.
 
 Restoring a Cluster's server (the backup is right, the live Cluster is wrong):
   1. Note the replicas of the ApplicationSet controller, stop it and wait for its pods to go:
@@ -320,7 +321,10 @@ func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error
 		if bak.GetNamespace() == "" {
 			bak.SetNamespace(im.scope.controlPlane)
 		}
-		inBackup[keyOf(bak)] = true
+		// The label leaves a Secret as it is, the same as a backup without a copy of it.
+		if bak.GetKind() != "Secret" || !skipLabelMatches(bak, im.o.skipLabel) {
+			inBackup[keyOf(bak)] = true
+		}
 		if bak.GetKind() != kindCluster.Kind {
 			continue
 		}
@@ -423,9 +427,14 @@ func (im *importer) startsReading(bak *unstructured.Unstructured, secret resourc
 // keepCredentials holds the Secret a live Cluster reads, so the import neither writes nor prunes it.
 func (im *importer) keepCredentials(live *unstructured.Unstructured) {
 	if secret, ok := credentialsKey(live); ok {
-		im.kept[secret] = "credentials of the live Cluster " + live.GetName()
+		im.kept[secret] = credentialsOf(live)
 		im.holders[secret] = append(im.holders[secret], live)
 	}
+}
+
+// credentialsOf says which live Cluster a held Secret is for.
+func credentialsOf(live *unstructured.Unstructured) string {
+	return "credentials of the live Cluster " + live.GetName()
 }
 
 // credentialsKey returns the key of the Secret a Cluster reads, if it names one.
@@ -1001,9 +1010,10 @@ func (im *importer) secretKeptReason(key resourceKey) string {
 	if key.Group != "" || key.Kind != "Secret" {
 		return ""
 	}
+	stays := slices.IndexFunc(im.holders[key], func(c *unstructured.Unstructured) bool { return !im.pruned[keyOf(c)] })
 	switch {
-	case im.kept[key] != "" && slices.ContainsFunc(im.holders[key], func(c *unstructured.Unstructured) bool { return !im.pruned[keyOf(c)] }):
-		return im.kept[key]
+	case im.kept[key] != "" && stays >= 0:
+		return credentialsOf(im.holders[key][stays])
 	case isRequiredSettingsSecret(key.Name):
 		return fmt.Sprintf("%s and %s are never pruned", settings.DefaultSecretName, settings.DefaultNotificationsSecretName)
 	case !im.backupHasSecrets:

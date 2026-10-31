@@ -93,6 +93,9 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
+    - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
@@ -104,7 +107,9 @@ API-080:
     isArgoCDSecret rule; referenced-only Secrets are exported and restored but never pruned),
     patrol-secret and patrol-notifications-secret are never pruned, and objects owned by a
     pruned ApplicationSet/Repository/RepositoryCredential/Cluster/SCMProvider are released
-    (owner reference removed) before the owner is deleted, so nothing cascades.
+    (owner reference removed) before the owner is deleted, so nothing cascades. A Secret a live
+    Cluster that stays reads is not pruned. OPS-143 records how an import treats a backup that moves
+    a live Cluster, with its evidence.
 
 API-081:
   status: verified
@@ -335,24 +340,28 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
+    - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
+    - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
-  evidence: docs/verification/log.md#V-0058
+  evidence: docs/verification/log.md#V-0059
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
     writing and --keep-live-clusters keeps the live Cluster and its Secret. A Cluster skipped by
     --skip-resources-with-label is not refused and keeps the Secret it references, as upstream's
     label covers both, whether or not the backup holds that Cluster. A live Cluster the backup does
-    not hold keeps that Secret too, also under --prune, which comes after every write and may not
-    remove the Cluster; the next import restores a Secret whose Cluster is gone. A backup that would
-    start a Cluster reading a Secret held this way, or one it has no copy of, is refused too if a
-    live Cluster reads that Secret at a server the backup does not use it for. An import gives an object the owners the backup names,
-    which upstream's update does not, and keeps the others, because two Cluster objects can own one
-    Secret here.
+    not hold keeps that Secret too until --prune removes that Cluster. --prune comes after every
+    write, so the next import restores a Secret of the backup whose Cluster is gone, and a Secret the
+    backup does not hold can be pruned with its Cluster. A backup that would start a Cluster reading
+    a Secret held this way, or one it has no copy of or skips, is refused too if a live Cluster reads
+    that Secret at a server the backup does not use it for. An import gives an object the owners the
+    backup names, which upstream's update does not, and keeps the others, because two Cluster objects
+    can own one Secret here.
 
 NOTIF-104:
   status: verified
