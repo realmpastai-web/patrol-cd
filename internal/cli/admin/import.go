@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
+	"github.com/juliosaraiva/patrol-cd/internal/clusters"
 	"github.com/juliosaraiva/patrol-cd/internal/settings"
 )
 
@@ -41,6 +43,7 @@ type importOptions struct {
 	appSetNamespaces   []string
 	namespaceScoped    bool
 	migrateGroup       bool
+	keepLiveClusters   bool
 }
 
 func newImportCommand(f *Factory, kube *kubeOptions) *cobra.Command {
@@ -69,7 +72,27 @@ garbage collector would otherwise delete the object.
 Objects of another Patrol CD API group (for example a backup taken before the API group
 was renamed) are refused unless --migrate-group is given; Argo CD objects (argoproj.io) are
 refused: convert them with "patrol admin argocd-import". Operations in a backup (exported
-with --include-operations) are never re-created: they would start syncs.`,
+with --include-operations) are never re-created: they would start syncs.
+
+A Cluster's server cannot change. A backup that points a Cluster at another server than the
+live Cluster of the same name is refused before anything is written, with or without
+--dry-run, listing every such Cluster. A difference of trailing slashes is the same server
+and is not refused. With --keep-live-clusters the live Cluster and the Secret it references
+stay as they are, also under --prune, and the rest of the backup is restored.
+
+Restoring a Cluster's server (the backup is right, the live Cluster is wrong):
+  1. Note the replicas of the ApplicationSet controller, stop it and wait for its pods to go:
+     kubectl -n NAMESPACE scale deployment -l app.kubernetes.io/component=applicationset-controller --replicas=0
+     kubectl -n NAMESPACE wait pod -l app.kubernetes.io/component=applicationset-controller --for=delete
+     Otherwise deleting the Cluster makes ApplicationSets delete its Applications; if the new
+     Cluster appears while they do, those Applications keep their finalizer and their
+     resources are deleted too.
+  2. kubectl -n NAMESPACE delete clusters.cd.patrol.example NAME --cascade=orphan
+     Otherwise the credentials Secret the Cluster owns is deleted with it.
+  3. If the backup holds no Secrets (--include-secrets=false), put the credentials of the
+     backup's server in that Secret. Otherwise the new Cluster uses the old server's.
+  4. patrol admin import -n NAMESPACE BACKUP
+  5. Scale the ApplicationSet controller back to the replicas noted in step 1.`,
 		Example: `# Restore a backup
 patrol admin import -n patrol backup.yaml
 
@@ -97,6 +120,7 @@ patrol admin import --prune backup.yaml`,
 		"Comma separated list of namespace globs which import of applicationsets is allowed. If not provided, value from '%s' in %s will be used. If it's not defined, only applicationsets without an explicit namespace will be imported to the control-plane namespace", cmdParamsAppSetNamespacesKey, settings.DefaultCmdParamsConfigMapName))
 	fl.BoolVar(&o.namespaceScoped, "namespace-scoped", false, "Namespace-scoped installation: read and write only the control-plane namespace")
 	fl.BoolVar(&o.migrateGroup, "migrate-group", false, fmt.Sprintf("Rewrite Patrol CD objects of another API group (and their %q-style keys) to the installed group %s", currentGroup+"/", currentGroup))
+	fl.BoolVar(&o.keepLiveClusters, "keep-live-clusters", false, "When the backup points a Cluster at another server than the live one, keep the live Cluster and its credentials Secret and import the rest")
 	fl.BoolVar(&o.promptsEnabled, "prompts-enabled", f.PromptsEnabled, "Force optional interactive prompts to be enabled or disabled, overriding local configuration. If not specified, the local configuration value will be used, which is false by default.")
 	return cmd
 }
@@ -204,6 +228,9 @@ type importer struct {
 	uids map[resourceKey]types.UID
 	// instanceLabel is the label of label-based resource tracking.
 	instanceLabel string
+	// kept are the backup objects not imported because the live Cluster they belong to points
+	// at another server, with the reason printed.
+	kept map[resourceKey]string
 }
 
 func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string, o importOptions) error {
@@ -231,11 +258,14 @@ func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string
 		return err
 	}
 	im := &importer{f: f, out: out, kc: kc, scope: scope, o: o, live: map[resourceKey]*unstructured.Unstructured{}, uids: map[resourceKey]types.UID{},
-		unmanaged: map[resourceKey]bool{}, pruned: map[resourceKey]bool{}, backupHasSecrets: containsSecrets(objs)}
+		unmanaged: map[resourceKey]bool{}, pruned: map[resourceKey]bool{}, backupHasSecrets: containsSecrets(objs), kept: map[resourceKey]string{}}
 	if o.dryRun {
 		im.dryRunMsg = " (dry run)"
 	}
 	if err := im.loadLive(ctx); err != nil {
+		return err
+	}
+	if err := im.checkClusterServers(objs); err != nil {
 		return err
 	}
 	var apps []*unstructured.Unstructured
@@ -262,6 +292,64 @@ func runImport(ctx context.Context, f *Factory, kube *kubeOptions, source string
 }
 
 func (im *importer) warn(msg string) { im.f.logger().Warn(msg) }
+
+// checkClusterServers compares the Clusters of the backup with the live ones before anything is
+// written, because spec.server cannot change. The CRD compares stored text, and every other reader
+// compares clusters.NormalizeServer, so a difference of trailing slashes takes the live text. A real
+// difference is refused unless the operator chose the live server, by --keep-live-clusters or by
+// skipping that Cluster; the credentials Secret of a Cluster that stays stays with it, because
+// credentials belong to one server.
+func (im *importer) checkClusterServers(objs []*unstructured.Unstructured) error {
+	var moved []string
+	for _, bak := range objs {
+		if bak.GetKind() != kindCluster.Kind {
+			continue
+		}
+		if bak.GetNamespace() == "" {
+			bak.SetNamespace(im.scope.controlPlane)
+		}
+		live, ok := im.live[keyOf(bak)]
+		if !ok {
+			continue
+		}
+		server, _, _ := unstructured.NestedString(bak.Object, "spec", "server")
+		liveServer, _, _ := unstructured.NestedString(live.Object, "spec", "server")
+		switch {
+		case clusters.NormalizeServer(server) == clusters.NormalizeServer(liveServer):
+			if err := unstructured.SetNestedField(bak.Object, liveServer, "spec", "server"); err != nil {
+				return err
+			}
+		case im.o.keepLiveClusters || skipLabelMatches(bak, im.o.skipLabel):
+			im.kept[keyOf(bak)] = fmt.Sprintf("live server %s, backup %s", printableServer(liveServer), printableServer(server))
+			if name, _, _ := unstructured.NestedString(live.Object, "spec", "config", "credentialsRef", "name"); name != "" {
+				k := resourceKey{Kind: "Secret", Namespace: bak.GetNamespace(), Name: name}
+				im.kept[k] = "credentials of the live Cluster " + bak.GetName()
+			}
+		default:
+			moved = append(moved, fmt.Sprintf("%s: live %s, backup %s", bak.GetName(), printableServer(liveServer), printableServer(server)))
+		}
+	}
+	if len(moved) == 0 {
+		return nil
+	}
+	return fmt.Errorf(`refusing to import: nothing was written.
+The backup points %d Cluster(s) at another server than the live Cluster of the same name, and a Cluster's server cannot change:
+  %s
+Credentials belong to one server, so choose before importing:
+  - If the live server is right, re-run with --keep-live-clusters. The live Cluster and its credentials Secret stay as they are and everything else is restored. Applications using destination.name deploy to the live server; those using the backup's destination.server report InvalidSpecError.
+  - If the backup's server is right, do not just delete the Cluster: ApplicationSets would delete its Applications. Follow "Restoring a Cluster's server" in 'patrol admin import --help', then re-run`,
+		len(moved), strings.Join(moved, "\n  "))
+}
+
+// printableServer drops what can hold a credential from a server URL for a message: the API
+// refuses such a server, the CRD does not.
+func printableServer(server string) string {
+	u, err := url.Parse(server)
+	if err != nil {
+		return "(invalid URL)"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
 
 // containsSecrets reports whether a backup has at least one Secret.
 func containsSecrets(objs []*unstructured.Unstructured) bool {
@@ -377,6 +465,10 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 
 	if skipLabelMatches(bak, im.o.skipLabel) {
 		_, _ = fmt.Fprintf(im.out, "Skipping %s/%s %s in namespace %s\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace())
+		return false, nil
+	}
+	if reason, ok := im.kept[key]; ok {
+		_, _ = fmt.Fprintf(im.out, "%s/%s %s in namespace %s kept: %s%s\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), reason, im.dryRunMsg)
 		return false, nil
 	}
 	switch kind := bak.GetKind(); {
@@ -749,6 +841,8 @@ func (im *importer) secretKeptReason(key resourceKey) string {
 		return ""
 	}
 	switch {
+	case im.kept[key] != "":
+		return im.kept[key]
 	case isRequiredSettingsSecret(key.Name):
 		return fmt.Sprintf("%s and %s are never pruned", settings.DefaultSecretName, settings.DefaultNotificationsSecretName)
 	case !im.backupHasSecrets:

@@ -35,7 +35,7 @@ same names. Errors that carry an exit code are `*admin.ExitError`.
 | Command | Notes |
 |---------|-------|
 | `export` | Settings ConfigMaps, referenced and Patrol-labelled Secrets, AppProjects, SCMProviders, Repositories, RepositoryCredentials, Clusters, ApplicationSets, Applications (control-plane namespace plus `--application-namespaces`/`--applicationset-namespaces` or the cmd-params globs; `--namespace-scoped`). Strips uid, resourceVersion, managedFields, status, last-applied; owner references kept with UID cleared. `--include-secrets` (default true) prints a warning that base64 is not encryption; `-o FILE` is written with mode 0600. `--include-operations` adds Operations (with status, as an audit record). |
-| `import SOURCE` | Creates/updates in dependency order; owner references re-pointed to the new UIDs (dangling ones dropped with a warning). Never deletes without `--prune`. Prune safety: settings ConfigMaps, `patrol-secret` and `patrol-notifications-secret` are never pruned; Secrets are pruned only when the backup contains Secrets (a `--include-secrets=false` backup prunes none) and only when managed by Patrol CD (`cd.patrol.example/secret-type` label or `managed-by: patrol-cd` annotation; Secrets that are only referenced are restored but never pruned); Applications' finalizers are removed before a prune delete; objects owned by a pruned ApplicationSet, Repository, RepositoryCredential, Cluster or SCMProvider are released (owner reference removed) before the owner is deleted with a UID precondition, so neither the garbage collector nor the ApplicationSet controller's ordered deletion removes them. `--dry-run`, `--verbose`, `--override-on-conflict`, `--skip-resources-with-label`, `--stop-operation` (sets `spec.cancel` on running Operations), `--ignore-tracking`, `--prompts-enabled`. Objects of another API group are refused (Argo CD's points to `argocd-import`, other Patrol groups require `--migrate-group`). Operations are never re-created. |
+| `import SOURCE` | Creates/updates in dependency order; owner references re-pointed to the new UIDs (dangling ones dropped with a warning). Never deletes without `--prune`. Prune safety: settings ConfigMaps, `patrol-secret` and `patrol-notifications-secret` are never pruned; Secrets are pruned only when the backup contains Secrets (a `--include-secrets=false` backup prunes none) and only when managed by Patrol CD (`cd.patrol.example/secret-type` label or `managed-by: patrol-cd` annotation; Secrets that are only referenced are restored but never pruned); Applications' finalizers are removed before a prune delete; objects owned by a pruned ApplicationSet, Repository, RepositoryCredential, Cluster or SCMProvider are released (owner reference removed) before the owner is deleted with a UID precondition, so neither the garbage collector nor the ApplicationSet controller's ordered deletion removes them. `--dry-run`, `--verbose`, `--override-on-conflict`, `--skip-resources-with-label`, `--stop-operation` (sets `spec.cancel` on running Operations), `--ignore-tracking`, `--prompts-enabled`. Objects of another API group are refused (Argo CD's points to `argocd-import`, other Patrol groups require `--migrate-group`). Operations are never re-created. A backup that points a Cluster at another server than the live Cluster of the same name is refused before anything is written, with or without `--dry-run`, because `spec.server` cannot change; every such Cluster is listed. A difference of trailing slashes is the same server and keeps the stored text. `--keep-live-clusters` keeps the live Cluster and the Secret it references, also from `--prune`, and restores the rest; a moved Cluster skipped by label keeps that Secret the same way. Taking the backup's server is a manual procedure, in `patrol admin import --help`. |
 | `settings validate` | Upstream groups and output (`✅`/`❌`). Flags renamed `--patrol-cm-path`/`--patrol-secret-path` (hidden `--argocd-*` aliases), `--load-cluster-settings`; Patrol addition `--settings-file` (repeatable) for the other settings objects. A file Secret without `server.secretkey` is validated as if present (patrol-server generates it). |
 | `settings resource-overrides` | `ignore-differences`, `ignore-resource-updates`, `health`, `list-actions`, `run-action` (alias `action`), using the real diff normalizers and the Lua runtime; upstream messages. |
 | `settings rbac can / validate` | Upstream wording and exit codes (`Yes`/`No`, `-q`), policies from `--policy-file` (CSV or ConfigMap YAML) or `--namespace`. |
@@ -100,6 +100,8 @@ procedure for the tracking method in use.
 - Inputs are bounded: backups 256 MiB, other files 16 MiB, WebSocket messages 1 MiB; URL inputs
   have a 30 s timeout.
 - Import and argocd-import refuse foreign API groups and never delete without `--prune`.
+- Import checks every Cluster before its first write and never replaces one: deleting a Cluster
+  makes ApplicationSets delete its Applications, and its credentials Secret goes with it.
 
 ## Differences from upstream
 
@@ -121,6 +123,11 @@ procedure for the tracking method in use.
   Secrets of a Secret-less backup, `patrol-secret` or `patrol-notifications-secret`, and never
   lets a pruned owner cascade to objects it owns (upstream deletes an ApplicationSet with
   background propagation).
+- Upstream keeps a cluster's server and credentials in one Secret, so an import moves both and
+  never refuses. Patrol keeps them in two objects and `spec.server` is immutable, so `import`
+  refuses a backup that moves a live Cluster, and `--keep-live-clusters` is a Patrol addition. For
+  a moved Cluster, `--skip-resources-with-label` also keeps the Secret the live Cluster references,
+  although that Secret does not carry the label.
 - Settings flags are named after Patrol objects (`--patrol-cm-path`, hidden `--argocd-cm-path`).
 - `--logformat`/`--loglevel` on `admin` are accepted (they only apply to `admin` itself, as
   upstream).
