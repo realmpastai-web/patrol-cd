@@ -507,8 +507,10 @@ helm rollback patrol <revision> -n patrol --wait
 
 - CRDs are templates, not Helm's `crds/` directory, so `helm upgrade` upgrades them (Helm 4
   uses server-side apply, which handles the large ApplicationSet CRD). They carry
-  `helm.sh/resource-policy: keep`. A rollback re-applies the older CRD schema; schemas are
-  additive within `v1alpha1`, but check the release notes before rolling back across versions.
+  `helm.sh/resource-policy: keep`. A rollback re-applies the older CRD schema. Fields are
+  additive within `v1alpha1`; validation rules are not, such as the one that keeps a Cluster's
+  `spec.server` from changing, and a rollback drops them. Check the release notes before rolling
+  back across versions.
 - Runtime material (`server.secretkey`, the admin password, the internal token) is not part of
   the manifests and survives upgrades and rollbacks.
 - Changing `configs.params` rolls the pods (checksum annotation); `configs.cm` and the other
