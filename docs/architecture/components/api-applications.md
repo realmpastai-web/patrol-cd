@@ -41,8 +41,8 @@ the Application and authorizes the object `<project>/<name>` (control-plane name
 | `GET /applications/{name}/syncwindows` | get | `{activeWindows, assignedWindows, canSync}` (manual evaluation now) plus `status` and `nextTransition` |
 | `GET /applications/{name}/revisions/{revision}/metadata` | get | Repo-server commit metadata with the project's effective source integrity; `?sourceIndex` (0-based), `?versionId` (history entry) |
 | `GET …/revisions/{revision}/chartdetails`, `…/ocimetadata` | get | Helm chart / OCI metadata of the selected source (`no chart found for application: <app>`) |
-| `GET /applications/{name}/manifests` | get | Repo-server rendering at `?revision` (single source) or `?revisions`+`?sourcePositions` (multi-source, equal lengths, 1-based); hydrator Applications render the dry source; `?noCache` |
-| `POST /applications/{name}/manifests-with-files` | get + override | Body: gzipped tar (`application/gzip`), ≤ 32 MiB (`MaxLocalFilesBytes`), optional `?checksum` (hex SHA-256); single-source Applications; extraction limits are the repo-server's |
+| `GET /applications/{name}/manifests` | get | Repo-server rendering at `?revision` (single source) or `?revisions`+`?sourcePositions` (multi-source, equal lengths, 1-based); hydrator Applications render the dry source; `?noCache`; renders with the destination's version and API versions (below), and answers 503 when they are not in the Cluster status and the destination does not answer |
+| `POST /applications/{name}/manifests-with-files` | get + override | Body: gzipped tar (`application/gzip`), ≤ 32 MiB (`MaxLocalFilesBytes`), optional `?checksum` (hex SHA-256); single-source Applications; extraction limits are the repo-server's; the destination's versions as in `manifests` |
 | `GET /applications/{name}/links` | get | `application.links` with `app`/`application`, `cluster` (identity fields only), `managedByURL` (annotation, else settings `url`); destination not permitted → 400 `error getting destination cluster` |
 | `GET /applications/{name}/resource/links` | get | `resource.links` for the Application itself (`group=cd.patrol.example&kind=Application&resourceName=<app>`) or a managed resource read through `Deps.LiveResources` (Secret data masked; not in the tree → 400 `<Kind> <group> <name> not found as part of application <app>`; no LiveResources → 503) |
 
@@ -185,7 +185,7 @@ the controller's resource tree. `withTreeHealth` (`health.go`, upstream
 | Hydrate annotation set on every refresh | only for hydrator Applications | upstream leaves it forever on others |
 | Refresh waits until the client deadline | at most 15 s, then 504 | bounded requests |
 | `GetManifestsWithFiles` client stream | gzipped tar body, optional checksum, requires `override` | no gRPC; local content is like a local sync |
-| Manifests: cluster version from live discovery | from `Cluster.status` (`serverVersion`, `info.apiVersions`) | the API server does not contact destination clusters |
+| Manifests: cluster version and API versions from live discovery on every call | from `Cluster.status` (`serverVersion`, `info.apiVersions`), which the controller keeps, and from the destination only when the status lacks one (the implicit in-cluster cluster, a Cluster with no Applications yet) | a preview should not cost a discovery of the destination; a destination the project does not permit is not contacted |
 | List: no pagination, repo filter on the first source | `limit`/`continue`; any source | contract; multi-source |
 | Create of a taken name returns the existing object or a spec diff error | 409 without content when the caller cannot get the existing Application | no cross-project disclosure |
 | Validation lookup failures reported as InvalidArgument | 503 `error validating project permissions` | not the caller's error |
@@ -248,8 +248,8 @@ manifests and masking, override rules, windows, deleting, replace gate, multi-so
 overrides, unavailable repo-server), the Operation admission policy with an impersonated
 service account (refused without the impersonate verb, admitted with it), rollback, terminate,
 operations list/get, sync windows, revision metadata, manifests (masking, unpermitted
-repository, multi-source refs, hydrator), manifests-with-files (override, checksum, gzip,
-size, content type), links (conditions, managed-by URL, Application and masked Secret
+repository, multi-source refs, hydrator, the destination's versions from the status or the
+destination), manifests-with-files (override, checksum, gzip, size, content type), links (conditions, managed-by URL, Application and masked Secret
 resource links, destination permission), races driven by a repo-server hook that changes the
 cluster while a handler validates (an upsert whose create loses to a concurrent create in
 another project is denied without update there; `/spec` keeps labels, annotations and

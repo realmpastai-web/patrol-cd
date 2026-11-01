@@ -2,9 +2,11 @@ package cache
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 )
 
 // discoveryResult is one snapshot of the cluster's served APIs. It is immutable once built.
@@ -138,6 +141,44 @@ func discoverAPIs(disco discovery.DiscoveryInterface, s *Settings, server string
 	d.serverVersion = normalizeServerVersion(info.GitVersion)
 	d.failures = failures
 	return d, nil
+}
+
+// servedAPIResources returns the server version and the served API resources of the cluster behind
+// disco: what GetServerVersion and GetAPIResources of its cache return. As in a full sync, group
+// versions whose discovery failed are left out.
+func servedAPIResources(disco discovery.DiscoveryInterface) (string, []APIResourceInfo, error) {
+	d, err := discoverAPIs(disco, &Settings{}, "")
+	if err != nil {
+		return "", nil, err
+	}
+	return d.serverVersion, d.all, nil
+}
+
+// DiscoverAPIResources is what a cache of the cluster behind cfg would report, for a caller that has
+// none: see servedAPIResources. The discovery client takes no context, so ctx reaches its requests
+// through the transport, and discoveryTimeout bounds them together.
+func DiscoverAPIResources(ctx context.Context, cfg *rest.Config) (string, []APIResourceInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+	bounded := rest.CopyConfig(cfg)
+	bounded.WarningHandler = rest.NoWarnings{}
+	bounded.Wrap(func(rt http.RoundTripper) http.RoundTripper { return contextTransport{ctx: ctx, next: rt} })
+	disco, err := discovery.NewDiscoveryClientForConfig(bounded)
+	if err != nil {
+		return "", nil, fmt.Errorf("create discovery client: %w", err)
+	}
+	return servedAPIResources(disco)
+}
+
+// contextTransport sends every request under ctx.
+type contextTransport struct {
+	ctx  context.Context
+	next http.RoundTripper
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t contextTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(r.WithContext(t.ctx))
 }
 
 // buildDiscovery derives the cache's API view from discovery documents. For each group the

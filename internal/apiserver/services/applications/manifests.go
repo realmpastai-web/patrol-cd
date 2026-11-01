@@ -21,6 +21,7 @@ import (
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
 	"github.com/juliosaraiva/patrol-cd/internal/apiserver/rest"
+	"github.com/juliosaraiva/patrol-cd/internal/cache"
 	"github.com/juliosaraiva/patrol-cd/internal/diff"
 	"github.com/juliosaraiva/patrol-cd/internal/project"
 	"github.com/juliosaraiva/patrol-cd/internal/rbac"
@@ -33,12 +34,12 @@ import (
 
 // renderInput is what the manifest requests of one Application share.
 type renderInput struct {
-	app     *v1alpha1.Application
-	proj    *v1alpha1.AppProject
-	st      *settings.Settings
-	cluster *v1alpha1.Cluster
-	// runtime sends the destination's Kubernetes version and API versions.
-	runtime     bool
+	app  *v1alpha1.Application
+	proj *v1alpha1.AppProject
+	st   *settings.Settings
+	// kubeVersion and apiVersions are the destination's; empty, they are left to the render tools.
+	kubeVersion string
+	apiVersions []string
 	refs        map[string]apiclient.RefTarget
 	hasMultiple bool
 	noCache     bool
@@ -166,6 +167,8 @@ func (s *Service) manifestRequest(ctx context.Context, in renderInput, source v1
 		Repos:                 deps,
 		HelmRepoCreds:         creds,
 		KustomizeOptions:      kustomizeOptions(in.st),
+		KubeVersion:           in.kubeVersion,
+		APIVersions:           in.apiVersions,
 		HelmOptions:           apiclient.HelmOptions{ValuesFileSchemes: in.st.HelmValuesFileSchemes()},
 		InstanceLabelKey:      in.st.InstanceLabelKey(),
 		TrackingMethod:        string(in.st.TrackingMethod()),
@@ -178,13 +181,37 @@ func (s *Service) manifestRequest(ctx context.Context, in renderInput, source v1
 		ManifestGeneratePaths: in.app.Annotations[v1alpha1.AnnotationKeyManifestGeneratePaths],
 		SourceIntegrity:       si,
 	}
-	if in.runtime && in.cluster != nil {
-		// The controller records the destination's version and API versions on the Cluster
-		// status; the API server does not contact destination clusters.
-		req.KubeVersion = in.cluster.Status.ServerVersion
-		req.APIVersions = in.cluster.Status.Info.APIVersions
-	}
 	return req, nil
+}
+
+// destinationVersions returns the Kubernetes version and API versions a preview renders with, so
+// that it gives what the controller applies. They are the status's, which the controller keeps. A
+// status without them, as on the in-cluster cluster, which has no object to hold them, or on a
+// Cluster with no Applications yet, sends the question to the destination, with the cluster's own
+// credentials as the controller's cache does. A destination the project does not permit is not
+// contacted.
+func (s *Service) destinationVersions(ctx context.Context, app *v1alpha1.Application, proj *v1alpha1.AppProject, st *settings.Settings, cluster *v1alpha1.Cluster) (string, []string, error) {
+	version, apis := cluster.Status.ServerVersion, cluster.Status.Info.APIVersions
+	if (version != "" && len(apis) > 0) || s.d.Resources.Clusters == nil {
+		return version, apis, nil
+	}
+	kl, _ := s.lookups(st)
+	permitted, err := project.IsDestinationPermitted(ctx, proj, project.DestinationOf(cluster, app.Spec.Destination.Namespace), kl)
+	if err != nil {
+		return "", nil, rest.Unavailable("error checking the destination cluster").WithCause(err)
+	}
+	if !permitted {
+		return version, apis, nil
+	}
+	target, err := s.appClusterConfig(ctx, app, proj, st, false)
+	if err != nil {
+		return "", nil, err
+	}
+	version, resources, err := cache.DiscoverAPIResources(ctx, target.config)
+	if err != nil {
+		return "", nil, s.destinationError(ctx, "error getting server version", err)
+	}
+	return version, cache.APIVersionStrings(resources), nil
 }
 
 // checkSourcesPermitted refuses to render repositories the project does not permit (an
@@ -340,7 +367,11 @@ func (s *Service) getManifests(ctx context.Context, q *pubapi.ApplicationManifes
 	if err != nil {
 		return nil, err
 	}
-	in := renderInput{app: app, proj: proj, st: st, cluster: cluster, runtime: true, refs: refs, hasMultiple: app.Spec.HasMultipleSources(), noCache: q.NoCache}
+	kubeVersion, apiVersions, err := s.destinationVersions(ctx, app, proj, st, cluster)
+	if err != nil {
+		return nil, err
+	}
+	in := renderInput{app: app, proj: proj, st: st, kubeVersion: kubeVersion, apiVersions: apiVersions, refs: refs, hasMultiple: app.Spec.HasMultipleSources(), noCache: q.NoCache}
 	hide := sensitiveAnnotations(st)
 	out := &pubapi.ApplicationManifestResponse{Manifests: []string{}, Namespace: app.Spec.Destination.Namespace, Server: cluster.Spec.Server}
 	for _, src := range sources {
@@ -446,7 +477,11 @@ func (s *Service) renderLocalFiles(ctx context.Context, w http.ResponseWriter, r
 	if err != nil {
 		return nil, rest.InvalidArgument("error getting application cluster config: %s", err.Error())
 	}
-	in := renderInput{app: app, proj: proj, st: st, cluster: cluster, runtime: true}
+	kubeVersion, apiVersions, err := s.destinationVersions(ctx, app, proj, st, cluster)
+	if err != nil {
+		return nil, err
+	}
+	in := renderInput{app: app, proj: proj, st: st, kubeVersion: kubeVersion, apiVersions: apiVersions}
 	mreq, err := s.manifestRequest(ctx, in, source, source.TargetRevision)
 	if err != nil {
 		return nil, err

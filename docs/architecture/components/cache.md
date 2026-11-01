@@ -52,6 +52,7 @@ reading settings (`internal/settings`), shard assignment (`internal/controller`)
 | `ResourceKey` | `{Group, Kind, Namespace, Name}`. `String()` gives `group/kind/namespace/name`, `ParseResourceKey`, `GroupKind()`, `KeyOf(un)`, `NewResourceKey`. |
 | `ClusterInfo` | `Server`, `K8SVersion`, `APIsCount`, `ResourcesCount`, `LastCacheSyncTime`, `SyncError`, `Synced`, `ActiveWatches`, `UnavailableAPIs []UnavailableAPI{GroupKind, Version, Namespace, Reason, Message}` (reasons: `ListForbidden`, `WatchForbidden`, `DiscoveryFailed`). |
 | `APIResourceInfo` | `GroupKind`, `GroupVersionResource`, `Meta metav1.APIResource`. |
+| `DiscoverAPIResources(ctx, *rest.Config)` | The server version and API resources a cache of the cluster would report, for a caller with no cache (`GET .../manifests`). The discovery client takes no context, so `ctx` reaches its requests through the transport, and `discoveryTimeout` bounds them together. |
 | `GVKParser` | `Type(gvk) *typed.ParseableType` (nil when unknown or ambiguous) and `Ambiguous()`. |
 | `Manager` | `NewManager(ManagerOptions{Logger, OnCacheCreated, CacheOptions})`, `Get(ctx, clusterKey, cfg, settings) (ClusterCache, error)` (creates if absent, then `EnsureSynced`), `Lookup(clusterKey) (ClusterCache, bool)` (the existing cache, without creating or syncing one), `Invalidate(clusterKey)` (closes and forgets), `ClustersInfo()`, `Close()`. |
 | Predicates | `TopLevelResource`, `ResourceOfGroupKind(group, kind)`. |

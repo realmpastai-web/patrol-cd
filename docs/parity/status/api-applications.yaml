@@ -357,14 +357,23 @@ API-019:
 
 API-020:
   status: implemented
-  impl: [internal/apiserver/services/applications/manifests.go]
+  impl: [internal/apiserver/services/applications/manifests.go, internal/cache/discovery.go]
   tests:
     - internal/apiserver/services/applications/manifests_test.go:TestGetManifests
     - internal/apiserver/services/applications/manifests_test.go:TestManifestsWithFiles
+    - internal/apiserver/services/applications/manifests_test.go:TestGetManifestsDestinationVersions
+    - internal/cache/discovery_test.go:TestServedAPIResources
+    - internal/cache/discovery_test.go:TestDiscoverAPIResources
+    - internal/cache/discovery_test.go:TestDiscoverAPIResourcesStopsWithItsContext
+    - test/integration/clusterinfo_test.go:TestManifestsMatchControllerCapabilities
+    - test/integration/clusterinfo_test.go:TestManifestsOfTheInClusterCluster
   notes: >-
     manifests-with-files takes a gzipped tar body (optional checksum query) instead of a
     client stream and requires override (deliberate difference); sources the project does not
-    permit are not rendered.
+    permit are not rendered. The destination's version and API versions come from Cluster.status,
+    and from the destination, with the cluster's credentials, only when the status lacks one, where
+    upstream always asks it. A destination the project does not permit is not contacted, and the
+    render then has what the status holds.
 
 API-025:
   status: implemented

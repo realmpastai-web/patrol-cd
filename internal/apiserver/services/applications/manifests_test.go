@@ -3,10 +3,15 @@ package applications_test
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
 	reposerver "github.com/juliosaraiva/patrol-cd/internal/reposerver/apiclient"
@@ -154,6 +160,205 @@ func TestManifestsWithFiles(t *testing.T) {
 		_ = resp2.Body.Close()
 	}
 	requireProblem(t, err, 415, "")
+}
+
+// clusterListLimit fails every ClusterList once pass runs out.
+type clusterListLimit struct {
+	client.Reader
+	pass atomic.Int64
+}
+
+func (l *clusterListLimit) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*v1alpha1.ClusterList); ok && l.pass.Add(-1) < 0 {
+		return errors.New("etcd is not available")
+	}
+	return l.Reader.List(ctx, list, opts...)
+}
+
+// A preview gives what the controller applies, so it renders with the destination's versions: the
+// status's, which the controller keeps, or the destination's own answer where the status lacks them.
+func TestGetManifestsDestinationVersions(t *testing.T) {
+	const edge = "https://edge.example.com"
+	reported := v1alpha1.ClusterStatus{ServerVersion: "v9.9.9", Info: v1alpha1.ClusterInfo{APIVersions: []string{"x.example/v1", "x.example/v1/Y"}}}
+
+	// env has an Application at the Cluster edge, whose status is status.
+	env := func(t *testing.T, o resEnvOptions, status v1alpha1.ClusterStatus) *resEnv {
+		t.Helper()
+		re := newResEnv(t, o)
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+			p.Spec.Destinations = append(p.Spec.Destinations, v1alpha1.ApplicationDestination{Server: edge, Namespace: "*"})
+		})
+		cl := &v1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: re.ns}, Spec: v1alpha1.ClusterSpec{Server: edge, Name: "edge"}}
+		require.NoError(t, re.kube.Create(re.ctx, cl))
+		cl.Status = status
+		require.NoError(t, re.kube.Status().Update(re.ctx, cl))
+		app := re.newApp("m", "proj-a")
+		app.Spec.Destination.Server = edge
+		re.createApp(app)
+		return re
+	}
+	get := func(re *resEnv) (*apiclient.ApplicationManifestResponse, error) {
+		return re.rclient("reader").GetApplicationManifests(re.ctx, &apiclient.ApplicationManifestQuery{Name: "m"})
+	}
+	getWithFiles := func(re *resEnv) (*apiclient.ApplicationManifestResponse, error) {
+		return re.rclient("alice").GetApplicationManifestsWithFiles(re.ctx, &apiclient.ApplicationManifestsWithFilesQuery{Name: "m"}, bytes.NewReader(tarGz(t, "fake tar")))
+	}
+	routes := map[string]func(*resEnv) (*apiclient.ApplicationManifestResponse, error){"manifests": get, "manifests with files": getWithFiles}
+	versionRequests := func(re *resEnv) []seenRequest {
+		return re.cluster.seen(func(r seenRequest) bool { return r.path == "/version" })
+	}
+	// answered checks that the render had the answer of the fake cluster, which is envtest.
+	answered := func(t *testing.T, re *resEnv) {
+		t.Helper()
+		gen := re.repo.lastGenerate()
+		assert.Regexp(t, `^v1\.\d+\.\d+$`, gen.KubeVersion)
+		assert.Contains(t, gen.APIVersions, "v1/ConfigMap")
+		assert.Contains(t, gen.APIVersions, "apps/v1/Deployment")
+		assert.NotContains(t, gen.APIVersions, "x.example/v1/Y")
+		assert.Len(t, versionRequests(re), 1)
+	}
+
+	for route, render := range routes {
+		t.Run("the in-cluster cluster has no object to report on: "+route, func(t *testing.T) {
+			re := newResEnv(t, resEnvOptions{})
+			re.createApp(re.newApp("m", "proj-a"))
+			_, err := render(re)
+			require.NoError(t, err)
+			answered(t, re)
+		})
+
+		t.Run("a status with both is enough: "+route, func(t *testing.T) {
+			re := env(t, resEnvOptions{}, reported)
+			_, err := render(re)
+			require.NoError(t, err)
+			gen := re.repo.lastGenerate()
+			assert.Equal(t, "v9.9.9", gen.KubeVersion)
+			assert.Equal(t, []string{"x.example/v1", "x.example/v1/Y"}, gen.APIVersions)
+			assert.Zero(t, re.configs.calls.Load(), "no configuration of the destination")
+			assert.Empty(t, versionRequests(re))
+		})
+
+		t.Run("an unreported Cluster: "+route, func(t *testing.T) {
+			re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+			_, err := render(re)
+			require.NoError(t, err)
+			answered(t, re)
+		})
+
+		t.Run("a destination that does not answer fails the preview: "+route, func(t *testing.T) {
+			re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+			gone := httptest.NewServer(http.NotFoundHandler())
+			gone.Close()
+			re.configs.host = gone.URL
+			_, err := render(re)
+			p := requireProblem(t, err, 503, "error getting server version: the destination cluster is not reachable")
+			assert.NotContains(t, p.Detail, strings.TrimPrefix(gone.URL, "http://"), "transport details stay in the log")
+		})
+	}
+
+	for name, status := range map[string]v1alpha1.ClusterStatus{
+		"a version alone":      {ServerVersion: "v9.9.9"},
+		"API versions alone":   {Info: reported.Info},
+		"a list with no items": {ServerVersion: "v9.9.9", Info: v1alpha1.ClusterInfo{APIVersions: []string{}}},
+	} {
+		t.Run(name+" does not describe the destination", func(t *testing.T) {
+			re := env(t, resEnvOptions{}, status)
+			_, err := get(re)
+			require.NoError(t, err)
+			answered(t, re)
+		})
+	}
+
+	t.Run("a destination named, which the project permits by server", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		app := re.getApp(re.ns, "m")
+		app.Spec.Destination = v1alpha1.ApplicationDestination{Name: "edge", Namespace: "default"}
+		require.NoError(t, re.kube.Update(re.ctx, app))
+		_, err := get(re)
+		require.NoError(t, err)
+		answered(t, re)
+	})
+
+	// An Application applied with kubectl is not validated, and a reader's preview must not be a way
+	// to reach a cluster its project does not permit.
+	t.Run("a destination the project does not permit is not contacted", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{ServerVersion: "v9.9.9"})
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+			p.Spec.Destinations = []v1alpha1.ApplicationDestination{{Server: inCluster, Namespace: "*"}}
+		})
+		_, err := get(re)
+		require.NoError(t, err)
+		assert.Equal(t, "v9.9.9", re.repo.lastGenerate().KubeVersion)
+		assert.Empty(t, re.repo.lastGenerate().APIVersions)
+		assert.Zero(t, re.configs.calls.Load())
+		assert.Empty(t, versionRequests(re))
+	})
+
+	t.Run("a project that permits only its own clusters", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) { p.Spec.PermitOnlyProjectScopedClusters = true })
+		_, err := get(re)
+		require.NoError(t, err)
+		assert.Empty(t, re.repo.lastGenerate().KubeVersion)
+		assert.Zero(t, re.configs.calls.Load(), "the Cluster is not the project's")
+
+		cl := &v1alpha1.Cluster{}
+		require.NoError(t, re.kube.Get(re.ctx, client.ObjectKey{Namespace: re.ns, Name: "edge"}, cl))
+		cl.Spec.Project = "proj-a"
+		require.NoError(t, re.kube.Update(re.ctx, cl))
+		_, err = get(re)
+		require.NoError(t, err)
+		answered(t, re)
+	})
+
+	t.Run("a permission that cannot be checked", func(t *testing.T) {
+		limit := &clusterListLimit{}
+		limit.pass.Store(math.MaxInt64)
+		re := env(t, resEnvOptions{reader: func(r client.Reader) client.Reader {
+			limit.Reader = r
+			return limit
+		}}, v1alpha1.ClusterStatus{ServerVersion: "v9.9.9"})
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) { p.Spec.PermitOnlyProjectScopedClusters = true })
+		limit.pass.Store(2) // the two reads before it: the Application's project and its destination
+		_, err := get(re)
+		p := requireProblem(t, err, 503, "error checking the destination cluster")
+		assert.NotContains(t, p.Detail, "etcd")
+		assert.Zero(t, re.configs.calls.Load())
+	})
+
+	t.Run("a configuration that cannot be built", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		re.configs.err = errors.New("read secret edge-token: forbidden")
+		_, err := get(re)
+		p := requireProblem(t, err, 503, "error getting application cluster config: the configuration of")
+		assert.NotContains(t, p.Detail, "edge-token")
+	})
+
+	t.Run("one discovery for the sources of a preview", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		app := re.getApp(re.ns, "m")
+		app.Spec.Source = nil
+		app.Spec.Sources = v1alpha1.ApplicationSources{
+			{RepoURL: repoURL, Path: "base", TargetRevision: "main"},
+			{RepoURL: repoURL, Path: "overlay", TargetRevision: "main"},
+		}
+		require.NoError(t, re.kube.Update(re.ctx, app))
+		_, err := get(re)
+		require.NoError(t, err)
+		answered(t, re)
+	})
+
+	// The controller's cache of the cluster reads these with the cluster's credentials: a service
+	// account of the project might not be allowed to, and would change the answer.
+	t.Run("impersonation does not apply", func(t *testing.T) {
+		re := env(t, resEnvOptions{cm: map[string]string{"application.sync.impersonation.enabled": "true"}}, v1alpha1.ClusterStatus{})
+		_, err := get(re)
+		require.NoError(t, err, "with no matching service account, an impersonated call is refused")
+		answered(t, re)
+		for _, r := range re.cluster.seen(func(seenRequest) bool { return true }) {
+			assert.Empty(t, r.impersonate, r.path)
+		}
+	})
 }
 
 func TestRevisionMetadata(t *testing.T) {
