@@ -105,6 +105,7 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersAcrossAConflict
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
@@ -359,10 +360,11 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAPrunedClusterShares
     - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersTheBackupDoesNotName
+    - internal/cli/admin/backup_test.go:TestImportKeepsTheOwnersAcrossAConflict
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
-  evidence: docs/verification/log.md#V-0063
+  evidence: docs/verification/log.md#V-0064
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before

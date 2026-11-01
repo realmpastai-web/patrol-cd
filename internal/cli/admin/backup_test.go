@@ -2,9 +2,12 @@ package admin
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1510,6 +1513,7 @@ func TestImportKeepsTheSecretOfAClusterItMayNotWrite(t *testing.T) {
 				assert.Equal(t, token, liveToken(t, ctx, ns, secret), secret)
 			}
 			assert.Regexp(t, tc.said, tio.out.String())
+			assert.NotRegexp(t, "/Cluster \\S+ in namespace \\S+ (created|updated)\n", tio.out.String())
 			assert.Contains(t, tio.errOut.String(), tc.warned)
 		})
 	}
@@ -2077,6 +2081,73 @@ func TestImportKeepsTheOwnersTheBackupDoesNotName(t *testing.T) {
 	}
 }
 
+// conflictOnce answers the first update of one Secret with a 409, as another writer would cause.
+type conflictOnce struct {
+	http.RoundTripper
+	secret     string
+	conflicted atomic.Bool
+}
+
+func (c *conflictOnce) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPut || !strings.HasSuffix(req.URL.Path, "/secrets/"+c.secret) || c.conflicted.Swap(true) {
+		return c.RoundTripper.RoundTrip(req)
+	}
+	body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","code":409}`
+	return &http.Response{
+		StatusCode: http.StatusConflict, Request: req, Body: io.NopCloser(strings.NewReader(body)),
+		Header: http.Header{"Content-Type": {"application/json"}},
+	}, nil
+}
+
+// The retry of --override-on-conflict writes what the first try would have, over the object it
+// reads again.
+func TestImportKeepsTheOwnersAcrossAConflict(t *testing.T) {
+	ctx := requireEnv(t)
+	ns := newNamespace(t, ctx, "conflict")
+	seedPatrol(t, ctx, ns)
+	createLiveCluster(t, ctx, ns, "second", edgeLabServer+"/second", edgeLabSecret, nil)
+	owner := func(name string) metav1.OwnerReference {
+		cluster, err := clusterObjects(ns).Get(ctx, name, metav1.GetOptions{})
+		require.NoError(t, err)
+		return metav1.OwnerReference{APIVersion: cluster.GetAPIVersion(), Kind: "Cluster", Name: name, UID: cluster.GetUID()}
+	}
+	secrets := envKube.CoreV1().Secrets(ns)
+	setOwners := func(refs ...metav1.OwnerReference) {
+		sec, err := secrets.Get(ctx, edgeLabSecret, metav1.GetOptions{})
+		require.NoError(t, err)
+		sec.OwnerReferences = refs
+		_, err = secrets.Update(ctx, sec, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}
+	setOwners(owner("edge-lab"))
+	setToken(t, ctx, ns, edgeLabSecret, edgeLabToken)
+	tio := newTestIO(ns)
+	backup := exportBackup(t, ctx, tio)
+	setOwners(owner("edge-lab"), owner("second"))
+	setToken(t, ctx, ns, edgeLabSecret, greenToken)
+	full := tio.f.RESTConfig
+	tio.f.RESTConfig = func() (*rest.Config, string, error) {
+		cfg, namespace, err := full()
+		if err == nil {
+			cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+				return &conflictOnce{RoundTripper: rt, secret: edgeLabSecret}
+			})
+		}
+		return cfg, namespace, err
+	}
+
+	require.NoError(t, tio.run(ctx, "admin", "import", "--override-on-conflict", backup))
+	assert.Contains(t, tio.out.String(), "retrying update for Group: , Kind: Secret, Name: "+edgeLabSecret)
+	sec, err := secrets.Get(ctx, edgeLabSecret, metav1.GetOptions{})
+	require.NoError(t, err)
+	var names []string
+	for _, ref := range sec.OwnerReferences {
+		names = append(names, ref.Name)
+	}
+	assert.ElementsMatch(t, []string{"edge-lab", "second"}, names)
+	assert.Equal(t, edgeLabToken, string(sec.Data["bearerToken"]))
+}
+
 // A live owner at an old UID is the owner the backup names: left there, the garbage collector
 // would delete the object.
 func TestImportReplacesAnOwnerAtAnOldUID(t *testing.T) {
@@ -2333,6 +2404,10 @@ func TestPrintableServer(t *testing.T) {
 		"https://x.example.com?token=t#fragment":    "https://x.example.com",
 		"https://x.example.com/\nspoofed":           "(invalid URL)",
 		"token123:x-oauth-basic@x.example.com:6443": "(invalid URL)",
+		"https://tok/en@x.example.com:6443":         "(invalid URL)",
+		"https://u:123/p@x.example.com":             "(invalid URL)",
+		"https://tok?en@x.example.com":              "(invalid URL)",
+		"https://tok#en@x.example.com":              "(invalid URL)",
 		"x.example.com:6443":                        "(invalid URL)",
 		"//x.example.com/no-scheme":                 "//x.example.com/no-scheme",
 		"/only/a/path":                              "(invalid URL)",

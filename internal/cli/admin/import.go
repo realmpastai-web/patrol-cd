@@ -477,11 +477,12 @@ func serverChange(live, backup string) string {
 }
 
 // printableServer drops what can hold a credential from a server URL for a message: the API
-// refuses such a server, the CRD does not. Text that only looks like a URL prints as invalid,
-// because whatever comes before its first colon parses as the scheme.
+// refuses such a server, the CRD does not. Text that only looks like a URL prints as invalid:
+// whatever comes before its first colon parses as the scheme, and userinfo with a /, ? or # in it
+// parses as a host and the rest, which an @ outside userinfo gives away.
 func printableServer(server string) string {
 	u, err := url.Parse(server)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || (u.User == nil && strings.Contains(server, "@")) {
 		return "(invalid URL)"
 	}
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
@@ -687,7 +688,7 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 		}
 	default:
 		if !im.o.dryRun {
-			newLive := updateLive(bak, liveObj)
+			newLive := restoredLive(bak, liveObj)
 			updated, err := dc.Update(ctx, newLive, metav1.UpdateOptions{})
 			if apierrors.IsConflict(err) {
 				_, _ = fmt.Fprintf(im.out, "Failed to update %s/%s %s in namespace %s: %v\n", gvk.Group, gvk.Kind, bak.GetName(), bak.GetNamespace(), err)
@@ -698,7 +699,7 @@ func (im *importer) importObject(ctx context.Context, bak *unstructured.Unstruct
 						if getErr != nil {
 							return getErr
 						}
-						newLive = updateLive(bak, cur)
+						newLive = restoredLive(bak, cur)
 						var uerr error
 						updated, uerr = dc.Update(ctx, newLive, metav1.UpdateOptions{})
 						return uerr
@@ -901,15 +902,22 @@ func mergedOwners(refs, live []metav1.OwnerReference) []metav1.OwnerReference {
 	return merged
 }
 
-// updateLive returns live with the labels, annotations, finalizers and data or spec of bak, and
-// the owners of both; status and other metadata stay as they are.
+// restoredLive returns live as the import writes it: updateLive, with the owners of both.
+func restoredLive(bak, live *unstructured.Unstructured) *unstructured.Unstructured {
+	newLive := updateLive(bak, live)
+	newLive.SetOwnerReferences(mergedOwners(bak.GetOwnerReferences(), live.GetOwnerReferences()))
+	return newLive
+}
+
+// updateLive returns live with the labels, annotations, finalizers, owner references and
+// data or spec of bak; status and other metadata stay as they are.
 func updateLive(bak, live *unstructured.Unstructured) *unstructured.Unstructured {
 	newLive := live.DeepCopy()
 	newLive.SetAnnotations(bak.GetAnnotations())
 	newLive.SetLabels(bak.GetLabels())
 	newLive.SetFinalizers(bak.GetFinalizers())
 	if refs := bak.GetOwnerReferences(); len(refs) > 0 {
-		newLive.SetOwnerReferences(mergedOwners(refs, live.GetOwnerReferences()))
+		newLive.SetOwnerReferences(refs)
 	}
 	switch live.GetKind() {
 	case "ConfigMap":

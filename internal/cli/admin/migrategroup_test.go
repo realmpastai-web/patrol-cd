@@ -144,6 +144,22 @@ func TestMigrateGroup(t *testing.T) {
 	rev, _, _ := unstructured.NestedString(newApp.Object, "spec", "source", "targetRevision")
 	assert.Equal(t, "v2", rev)
 
+	// --overwrite gives the copy the source's owners and no others.
+	newApp.SetOwnerReferences(append(newApp.GetOwnerReferences(), metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "other", UID: "other-uid"}))
+	_, err = envDyn.Resource(kindApplication.gvr(currentGroup)).Namespace(ns).Update(ctx, newApp, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	src, err = envDyn.Resource(kindApplication.gvr(oldGroup)).Namespace(ns).Get(ctx, "a", metav1.GetOptions{})
+	require.NoError(t, err)
+	src.Object["spec"].(map[string]any)["source"].(map[string]any)["targetRevision"] = "v3"
+	_, err = envDyn.Resource(kindApplication.gvr(oldGroup)).Namespace(ns).Update(ctx, src, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, tio.run(ctx, "admin", "migrate-group", "--from-group", oldGroup, "--dry-run=false", "--overwrite"))
+	newApp, err = get(kindApplication, "a")
+	require.NoError(t, err)
+	owners := newApp.GetOwnerReferences()
+	require.Len(t, owners, 1)
+	assert.Equal(t, "ApplicationSet", owners[0].Kind)
+
 	// Errors.
 	require.ErrorContains(t, tio.run(ctx, "admin", "migrate-group", "--from-group", currentGroup), "must name two different API groups")
 	require.ErrorContains(t, tio.run(ctx, "admin", "migrate-group", "--from-group", "argoproj.io"), "use 'patrol admin argocd-import'")
