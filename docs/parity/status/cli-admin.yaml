@@ -92,6 +92,7 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportRefusesALiveClusterSwitchedToAHeldSecret
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportRefusesASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportPrunesASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAClusterOfTheBackupReads
@@ -99,10 +100,6 @@ API-080:
     - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotWrite
-    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterRefusedAfterTheDryRun
-    - internal/cli/admin/backup_test.go:TestImportStopsAtAClusterUpdateTheServerRejects
-    - internal/cli/admin/backup_test.go:TestImportRefusesACrossingARefusedUpdateMakes
-    - internal/cli/admin/backup_test.go:TestImportDryRunReportsARefusedUpdate
     - internal/cli/admin/backup_test.go:TestImportWarnsAnAccountThatCannotListClusters
     - internal/cli/admin/backup_test.go:TestImportThatStopsAfterAClusterLeavesItNoCredentials
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
@@ -349,6 +346,7 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportRefusesALiveClusterSwitchedToAHeldSecret
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretOnceItsClusterIsPruned
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterThePromptKeeps
+    - internal/cli/admin/backup_test.go:TestImportRefusesASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportRestoresASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportPrunesASecretALiveClusterMovesOff
     - internal/cli/admin/backup_test.go:TestImportKeepsASecretAClusterOfTheBackupReads
@@ -356,10 +354,6 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportDoesNotOfferTheSecretOfAClusterThePromptKeeps
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotDelete
     - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterItMayNotWrite
-    - internal/cli/admin/backup_test.go:TestImportKeepsTheSecretOfAClusterRefusedAfterTheDryRun
-    - internal/cli/admin/backup_test.go:TestImportStopsAtAClusterUpdateTheServerRejects
-    - internal/cli/admin/backup_test.go:TestImportRefusesACrossingARefusedUpdateMakes
-    - internal/cli/admin/backup_test.go:TestImportDryRunReportsARefusedUpdate
     - internal/cli/admin/backup_test.go:TestImportWarnsAnAccountThatCannotListClusters
     - internal/cli/admin/backup_test.go:TestImportThatStopsAfterAClusterLeavesItNoCredentials
     - internal/cli/admin/backup_test.go:TestImportListsEveryCrossedCluster
@@ -368,7 +362,7 @@ OPS-143:
     - internal/cli/admin/backup_test.go:TestImportReplacesAnOwnerAtAnOldUID
     - internal/cli/admin/backup_test.go:TestImportStopsAtASecretOnlyABackupRepositoryReferences
     - internal/cli/admin/backup_test.go:TestImportRestoresATLSSecretALiveClusterReferences
-  evidence: docs/verification/log.md#V-0062
+  evidence: docs/verification/log.md#V-0063
   notes: >-
     Differs from upstream on a backup that moves a live Cluster: upstream's one Secret moves server
     and credentials together, while Patrol's spec.server is immutable, so the import refuses before
@@ -378,12 +372,11 @@ OPS-143:
     not hold keeps that Secret too until --prune removes that Cluster. --prune comes after every
     write, so the next import restores a Secret of the backup whose Cluster is gone, and a Secret the
     backup does not hold can be pruned with its Cluster. A backup that would start a Cluster reading
-    a Secret held this way, or one it has no copy of or skips, is refused too if a live Cluster reads
-    that Secret at a server the backup does not use it for. A server-side dry run of the writes that
-    change the Secret a Cluster reads comes first, because a Cluster whose update is refused stays on
-    the Secret it reads. An import gives an object the owners the
-    backup names, which upstream's update does not, and keeps the others, because two Cluster objects
-    can own one Secret here.
+    a Secret a live Cluster reads at a server the backup does not use it for is refused too, whatever
+    the account may write, whether or not it restores that Secret and even if it moves the live
+    Cluster off it, because the import writes a Cluster before its Secret. A Cluster whose update is
+    refused stays on the Secret it reads. An import gives an object the owners the backup names, which upstream's update does not,
+    and keeps the others, because two Cluster objects can own one Secret here.
 
 NOTIF-104:
   status: verified
