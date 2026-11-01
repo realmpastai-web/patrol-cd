@@ -182,3 +182,32 @@ func TestCoreKubernetesRBACIsTheAuthorization(t *testing.T) {
 	}
 	assert.Positive(t, core, "no audited request of the in-process server")
 }
+
+// A preview asks the destination only for what Cluster.status lacks, with the caller's credentials.
+// A cluster the kubeconfig has no context for is not asked, as in a connection check: the render has
+// what the status holds, and a sync selection or a diff goes on.
+func TestCorePreviewVersions(t *testing.T) {
+	const remote = "https://remote.example.com"
+	e := newCoreEnv(t)
+	e.repo.set(t, "guestbook", cmGuestbook)
+	kc, _ := e.user("operator", operatorRules()...)
+	cl := &v1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Namespace: e.ns, Name: "remote"}, Spec: v1alpha1.ClusterSpec{Server: remote, Name: "remote"}}
+	require.NoError(t, e.admin.Create(e.ctx, cl))
+	cl.Status = v1alpha1.ClusterStatus{ServerVersion: "v1.30.0"}
+	require.NoError(t, e.admin.Status().Update(e.ctx, cl))
+	e.run(kc, "app", "create", "remote", "--repo", repoURL, "--path", "guestbook",
+		"--dest-server", remote, "--dest-namespace", e.dest, "--project", "default", "--validate=false").Succeeded(t)
+
+	r := e.run(kc, "app", "manifests", "remote", "--revision", "main")
+	r.Succeeded(t)
+	assert.Contains(t, r.Stdout, "ConfigMap")
+	assert.Equal(t, "v1.30.0", e.repo.lastRender().KubeVersion)
+	assert.Empty(t, e.repo.lastRender().APIVersions)
+	assert.Equal(t, 1, e.run(kc, "app", "diff", "remote", "--revision", "main").Code, "the diff, not a failure")
+
+	e.run(kc, "app", "create", "local", "--repo", repoURL, "--path", "guestbook",
+		"--dest-server", "https://kubernetes.default.svc", "--dest-namespace", e.dest, "--project", "default", "--validate=false").Succeeded(t)
+	e.run(kc, "app", "manifests", "local", "--revision", "main").Succeeded(t)
+	assert.Regexp(t, `^v1\.\d+\.\d+$`, e.repo.lastRender().KubeVersion, "the selected context's cluster answered")
+	assert.Contains(t, e.repo.lastRender().APIVersions, "v1/ConfigMap")
+}

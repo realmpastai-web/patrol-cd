@@ -6,11 +6,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -175,6 +179,30 @@ func (l *clusterListLimit) List(ctx context.Context, list client.ObjectList, opt
 	return l.Reader.List(ctx, list, opts...)
 }
 
+// noContextError is what a provider with no credentials for a cluster fails with, as core mode's.
+type noContextError struct{}
+
+func (noContextError) Error() string  { return "no kubeconfig context" }
+func (noContextError) NoCredentials() {}
+
+// logBuffer is the output of a logger read while the server runs.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // A preview gives what the controller applies, so it renders with the destination's versions: the
 // status's, which the controller keeps, or the destination's own answer where the status lacks them.
 func TestGetManifestsDestinationVersions(t *testing.T) {
@@ -251,15 +279,76 @@ func TestGetManifestsDestinationVersions(t *testing.T) {
 			gone.Close()
 			re.configs.host = gone.URL
 			_, err := render(re)
-			p := requireProblem(t, err, 503, "error getting server version: the destination cluster is not reachable")
+			p := requireProblem(t, err, 503, "error getting the destination's versions: the destination cluster is not reachable")
 			assert.NotContains(t, p.Detail, strings.TrimPrefix(gone.URL, "http://"), "transport details stay in the log")
+		})
+
+		for name, status := range map[string]v1alpha1.ClusterStatus{
+			"a version alone":    {ServerVersion: "v9.9.9"},
+			"API versions alone": {Info: reported.Info},
+		} {
+			t.Run("a server with no credentials for the destination renders with "+name+": "+route, func(t *testing.T) {
+				re := env(t, resEnvOptions{}, status)
+				re.configs.err = fmt.Errorf("destination: %w", noContextError{})
+				_, err := render(re)
+				require.NoError(t, err)
+				assert.Equal(t, status.ServerVersion, re.repo.lastGenerate().KubeVersion)
+				assert.Equal(t, status.Info.APIVersions, re.repo.lastGenerate().APIVersions)
+				assert.EqualValues(t, 1, re.configs.calls.Load())
+				assert.Empty(t, versionRequests(re))
+			})
+		}
+	}
+
+	// A preview is a question about the Application, whatever the destination answers.
+	for answer, status := range map[string]int{"refuses": http.StatusForbidden, "does not know": http.StatusNotFound, "is busy": http.StatusTooManyRequests} {
+		t.Run("a destination that "+answer, func(t *testing.T) {
+			re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeStatus(w, status, "the destination's own text")
+			}))
+			t.Cleanup(srv.Close)
+			re.configs.host = srv.URL
+			_, err := get(re)
+			requireProblem(t, err, 503, "error getting the destination's versions: ")
 		})
 	}
 
+	t.Run("a group version the destination does not describe is left out, and logged", func(t *testing.T) {
+		logs := &logBuffer{}
+		re := env(t, resEnvOptions{logger: slog.New(slog.NewTextHandler(logs, nil))}, v1alpha1.ClusterStatus{})
+		gv := metav1.GroupVersionForDiscovery{GroupVersion: "down.example/v1", Version: "v1"}
+		docs := map[string]any{
+			"/version": map[string]string{"gitVersion": "v1.30.2"},
+			"/api":     metav1.APIVersions{Versions: []string{"v1"}},
+			"/apis":    metav1.APIGroupList{Groups: []metav1.APIGroup{{Name: "down.example", Versions: []metav1.GroupVersionForDiscovery{gv}, PreferredVersion: gv}}},
+			"/api/v1": metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{
+				{Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: metav1.Verbs{"list", "watch"}},
+			}},
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			doc, ok := docs[r.URL.Path]
+			if !ok {
+				writeStatus(w, http.StatusServiceUnavailable, "the aggregated API is down")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(doc)
+		}))
+		t.Cleanup(srv.Close)
+		re.configs.host = srv.URL
+		_, err := get(re)
+		require.NoError(t, err)
+		gen := re.repo.lastGenerate()
+		assert.Equal(t, "v1.30.2", gen.KubeVersion)
+		assert.Equal(t, []string{"v1", "v1/ConfigMap"}, gen.APIVersions)
+		assert.Contains(t, logs.String(), "group=down.example")
+		assert.Contains(t, logs.String(), "server="+edge)
+	})
+
 	for name, status := range map[string]v1alpha1.ClusterStatus{
-		"a version alone":      {ServerVersion: "v9.9.9"},
-		"API versions alone":   {Info: reported.Info},
-		"a list with no items": {ServerVersion: "v9.9.9", Info: v1alpha1.ClusterInfo{APIVersions: []string{}}},
+		"a version alone":    {ServerVersion: "v9.9.9"},
+		"API versions alone": {Info: reported.Info},
 	} {
 		t.Run(name+" does not describe the destination", func(t *testing.T) {
 			re := env(t, resEnvOptions{}, status)
@@ -281,17 +370,43 @@ func TestGetManifestsDestinationVersions(t *testing.T) {
 
 	// An Application applied with kubectl is not validated, and a reader's preview must not be a way
 	// to reach a cluster its project does not permit.
-	t.Run("a destination the project does not permit is not contacted", func(t *testing.T) {
-		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{ServerVersion: "v9.9.9"})
+	for name, status := range map[string]v1alpha1.ClusterStatus{
+		"a version alone":    {ServerVersion: "v9.9.9"},
+		"API versions alone": {Info: reported.Info},
+	} {
+		t.Run("a destination the project does not permit is not contacted, with "+name, func(t *testing.T) {
+			re := env(t, resEnvOptions{}, status)
+			re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+				p.Spec.Destinations = []v1alpha1.ApplicationDestination{{Server: inCluster, Namespace: "*"}}
+			})
+			_, err := get(re)
+			require.NoError(t, err)
+			assert.Equal(t, status.ServerVersion, re.repo.lastGenerate().KubeVersion)
+			assert.Equal(t, status.Info.APIVersions, re.repo.lastGenerate().APIVersions)
+			assert.Zero(t, re.configs.calls.Load())
+			assert.Empty(t, versionRequests(re))
+		})
+	}
+
+	t.Run("a namespace the project does not permit is not contacted", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
 		re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
-			p.Spec.Destinations = []v1alpha1.ApplicationDestination{{Server: inCluster, Namespace: "*"}}
+			p.Spec.Destinations = []v1alpha1.ApplicationDestination{{Server: edge, Namespace: "elsewhere"}}
 		})
 		_, err := get(re)
 		require.NoError(t, err)
-		assert.Equal(t, "v9.9.9", re.repo.lastGenerate().KubeVersion)
-		assert.Empty(t, re.repo.lastGenerate().APIVersions)
 		assert.Zero(t, re.configs.calls.Load())
 		assert.Empty(t, versionRequests(re))
+	})
+
+	t.Run("the namespace the project permits", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+			p.Spec.Destinations = []v1alpha1.ApplicationDestination{{Server: edge, Namespace: "default"}}
+		})
+		_, err := get(re)
+		require.NoError(t, err)
+		answered(t, re)
 	})
 
 	t.Run("a project that permits only its own clusters", func(t *testing.T) {
@@ -355,10 +470,55 @@ func TestGetManifestsDestinationVersions(t *testing.T) {
 		_, err := get(re)
 		require.NoError(t, err, "with no matching service account, an impersonated call is refused")
 		answered(t, re)
+
+		re = env(t, resEnvOptions{cm: map[string]string{"application.sync.impersonation.enabled": "true"}}, v1alpha1.ClusterStatus{})
+		re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+			p.Spec.DestinationServiceAccounts = []v1alpha1.ApplicationDestinationServiceAccount{{Server: edge, Namespace: "*", DefaultServiceAccount: "default:deployer"}}
+		})
+		_, err = get(re)
+		require.NoError(t, err)
+		answered(t, re)
 		for _, r := range re.cluster.seen(func(seenRequest) bool { return true }) {
 			assert.Empty(t, r.impersonate, r.path)
 		}
 	})
+}
+
+// Validating an Application reads only the status, so that a create does not depend on its
+// destination, and a hydrator's dry source is checked without cluster data.
+func TestValidationRendersWithTheStatus(t *testing.T) {
+	const edge = "https://edge.example.com"
+	re := newResEnv(t, resEnvOptions{})
+	re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+		p.Spec.Destinations = append(p.Spec.Destinations, v1alpha1.ApplicationDestination{Server: edge, Namespace: "*"})
+	})
+	cl := &v1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: re.ns}, Spec: v1alpha1.ClusterSpec{Server: edge, Name: "edge"}}
+	require.NoError(t, re.kube.Create(re.ctx, cl))
+	cl.Status = v1alpha1.ClusterStatus{ServerVersion: "v9.9.9", Info: v1alpha1.ClusterInfo{APIVersions: []string{"x.example/v1", "x.example/v1/Y"}}}
+	require.NoError(t, re.kube.Status().Update(re.ctx, cl))
+
+	plain := re.newApp("plain", "proj-a")
+	plain.Spec.Destination.Server = edge
+	_, err := re.rclient("alice").CreateApplication(re.ctx, &apiclient.ApplicationCreateRequest{Application: plain})
+	require.NoError(t, err)
+	gen := re.repo.lastGenerate()
+	assert.Equal(t, "v9.9.9", gen.KubeVersion)
+	assert.Equal(t, cl.Status.Info.APIVersions, gen.APIVersions)
+
+	hydrated := re.newApp("hydrated", "proj-a")
+	hydrated.Spec.Destination.Server = edge
+	hydrated.Spec.Source = nil
+	hydrated.Spec.SourceHydrator = &v1alpha1.SourceHydrator{
+		DrySource:  v1alpha1.DrySource{RepoURL: repoURL, TargetRevision: "main", Path: "dry"},
+		SyncSource: v1alpha1.SyncSource{TargetBranch: "env/prod", Path: "prod"},
+	}
+	_, err = re.rclient("alice").CreateApplication(re.ctx, &apiclient.ApplicationCreateRequest{Application: hydrated})
+	require.NoError(t, err)
+	gen = re.repo.lastGenerate()
+	assert.Equal(t, "dry", gen.Source.Path)
+	assert.Empty(t, gen.KubeVersion)
+	assert.Empty(t, gen.APIVersions)
+	assert.Zero(t, re.configs.calls.Load(), "no configuration of the destination")
 }
 
 func TestRevisionMetadata(t *testing.T) {

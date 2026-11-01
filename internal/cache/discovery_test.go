@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	k8sversion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+
+	"github.com/juliosaraiva/patrol-cd/internal/clusters"
 )
 
 type excludeFilter map[schema.GroupKind]bool
@@ -164,9 +167,10 @@ func TestServedAPIResources(t *testing.T) {
 		},
 	}
 
-	version, resources, err := servedAPIResources(stub)
+	version, resources, unavailable, err := servedAPIResources(stub)
 	require.NoError(t, err)
 	assert.Equal(t, "v1.30.2", version, "the form the cache gives")
+	assert.Empty(t, unavailable)
 	assert.Equal(t, []string{
 		"autoscaling/v1", "autoscaling/v1/HorizontalPodAutoscaler",
 		"autoscaling/v2", "autoscaling/v2/HorizontalPodAutoscaler",
@@ -181,43 +185,50 @@ func TestServedAPIResources(t *testing.T) {
 	partial := stub
 	partial.lists = stub.lists[:1]
 	partial.listsErr = &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "metrics.k8s.io", Version: "v1beta1"}: errors.New("no endpoints")}}
-	_, resources, err = servedAPIResources(partial)
+	_, resources, unavailable, err = servedAPIResources(partial)
 	require.NoError(t, err, "as in a full sync, one failed group version is left out")
 	assert.Equal(t, []string{"v1", "v1/ConfigMap", "v1/Event"}, APIVersionStrings(resources))
+	require.Len(t, unavailable, 1)
+	assert.Equal(t, "metrics.k8s.io", unavailable[0].GroupKind.Group)
+	assert.Equal(t, "v1beta1", unavailable[0].Version)
 
 	refused := errors.New("connection refused")
-	_, _, err = servedAPIResources(stubDiscovery{versionErr: refused})
+	_, _, _, err = servedAPIResources(stubDiscovery{versionErr: refused})
 	require.ErrorIs(t, err, refused)
 
 	failed := stub
 	failed.lists, failed.listsErr = nil, refused
-	_, _, err = servedAPIResources(failed)
+	_, _, _, err = servedAPIResources(failed)
 	require.ErrorIs(t, err, refused)
 
 	allFailed := partial
 	allFailed.lists = nil
-	_, _, err = servedAPIResources(allFailed)
+	_, _, _, err = servedAPIResources(allFailed)
 	var gdf *discovery.ErrGroupDiscoveryFailed
 	require.ErrorAs(t, err, &gdf, "nothing served is a failure")
 }
 
-// discoveryServer serves the legacy discovery documents of a cluster with one API group.
-func discoveryServer(t *testing.T) *httptest.Server {
-	t.Helper()
+// discoveryHandler serves the legacy discovery documents of a cluster with the API groups named,
+// each serving v1.
+func discoveryHandler(groups ...string) http.Handler {
 	lw := metav1.Verbs{"get", "list", "watch"}
-	gv := metav1.GroupVersionForDiscovery{GroupVersion: "example.com/v1", Version: "v1"}
 	docs := map[string]any{
 		"/version": k8sversion.Info{GitVersion: "v1.30.2-eks-1"},
 		"/api":     metav1.APIVersions{Versions: []string{"v1"}},
-		"/apis":    metav1.APIGroupList{Groups: []metav1.APIGroup{{Name: "example.com", Versions: []metav1.GroupVersionForDiscovery{gv}, PreferredVersion: gv}}},
 		"/api/v1": metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{
 			{Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: lw},
 		}},
-		"/apis/example.com/v1": metav1.APIResourceList{GroupVersion: "example.com/v1", APIResources: []metav1.APIResource{
-			{Name: "widgets", Kind: "Widget", Namespaced: true, Verbs: lw},
-		}},
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	list := metav1.APIGroupList{}
+	for _, g := range groups {
+		gv := metav1.GroupVersionForDiscovery{GroupVersion: g + "/v1", Version: "v1"}
+		list.Groups = append(list.Groups, metav1.APIGroup{Name: g, Versions: []metav1.GroupVersionForDiscovery{gv}, PreferredVersion: gv})
+		docs["/apis/"+g+"/v1"] = metav1.APIResourceList{GroupVersion: g + "/v1", APIResources: []metav1.APIResource{
+			{Name: "widgets", Kind: "Widget", Namespaced: true, Verbs: lw},
+		}}
+	}
+	docs["/apis"] = list
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc, ok := docs[r.URL.Path]
 		if !ok {
 			http.NotFound(w, r)
@@ -226,7 +237,13 @@ func discoveryServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Warning", `299 - "deprecated"`)
 		_ = json.NewEncoder(w).Encode(doc)
-	}))
+	})
+}
+
+// discoveryServer serves a cluster with one API group.
+func discoveryServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(discoveryHandler("example.com"))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -241,7 +258,7 @@ func TestDiscoverAPIResources(t *testing.T) {
 	warnings := &warningCounter{}
 	cfg := &rest.Config{Host: discoveryServer(t).URL, WarningHandler: warnings}
 	for range 2 {
-		version, resources, err := DiscoverAPIResources(t.Context(), cfg)
+		version, resources, _, err := DiscoverAPIResources(t.Context(), cfg)
 		require.NoError(t, err)
 		assert.Equal(t, "v1.30.2", version)
 		assert.Equal(t, []string{"example.com/v1", "example.com/v1/Widget", "v1", "v1/ConfigMap"}, APIVersionStrings(resources))
@@ -274,7 +291,7 @@ func TestDiscoverAPIResourcesBoundsItsRequests(t *testing.T) {
 	})
 
 	start := time.Now()
-	_, _, err := DiscoverAPIResources(t.Context(), cfg)
+	_, _, _, err := DiscoverAPIResources(t.Context(), cfg)
 	end := time.Now()
 	require.NoError(t, err)
 
@@ -308,7 +325,7 @@ func TestDiscoverAPIResourcesStopsWithItsContext(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := DiscoverAPIResources(ctx, &rest.Config{Host: srv.URL})
+		_, _, _, err := DiscoverAPIResources(ctx, &rest.Config{Host: srv.URL})
 		result <- err
 	}()
 	select {
@@ -323,6 +340,61 @@ func TestDiscoverAPIResourcesStopsWithItsContext(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the discovery outlived its context")
 	}
+}
+
+// A failed group version makes client-go run a second pass, and what fails in the last pass stays out
+// of an answer that still reads as partial: what the context cut must not pass for that.
+func TestDiscoverAPIResourcesReportsAnAnswerItsContextCut(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	docs := discoveryHandler("broken.example", "slow.example")
+	var slow atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apis/broken.example/v1":
+			http.Error(w, "the aggregated API is down", http.StatusServiceUnavailable)
+			return
+		case "/apis/slow.example/v1":
+			if slow.Add(1) == 2 {
+				time.Sleep(200 * time.Millisecond) // /api/v1 of this pass arrives, so the answer has something
+				cancel()
+				<-r.Context().Done()
+				return
+			}
+		}
+		docs.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, resources, _, err := DiscoverAPIResources(ctx, &rest.Config{Host: srv.URL})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, resources)
+	assert.EqualValues(t, 2, slow.Load(), "the shape this test is about: the second pass was the one cut")
+}
+
+// clusters.ApplyTuning builds a transport per configuration and nothing else closes it, so what a
+// discovery left idle on it would stay until the idle timeout, one connection per preview.
+func TestDiscoverAPIResourcesClosesItsConnections(t *testing.T) {
+	t.Parallel()
+	var open atomic.Int64
+	srv := httptest.NewUnstartedServer(discoveryHandler("example.com"))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		switch s {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed:
+			open.Add(-1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	cfg := &rest.Config{Host: srv.URL, BearerToken: "made-up"}
+	require.NoError(t, clusters.ApplyTuning(cfg, clusters.DefaultTuning()))
+	_, _, _, err := DiscoverAPIResources(t.Context(), cfg)
+	require.NoError(t, err)
+	assert.Eventually(t, func() bool { return open.Load() == 0 }, 5*time.Second, 10*time.Millisecond, "connections left open")
 }
 
 func TestNormalizeServerVersion(t *testing.T) {

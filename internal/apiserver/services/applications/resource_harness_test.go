@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -401,6 +402,7 @@ type resEnvOptions struct {
 	now       func() time.Time // the service's clock (Deps.Now); nil: time.Now
 	// reader wraps what the service reads through (Deps.Reader); nil: the Kubernetes client.
 	reader func(client.Reader) client.Reader
+	logger *slog.Logger // the service's logger; nil: none
 }
 
 // resEnv is an API server with the resource routes: envtest is both the control plane and
@@ -453,6 +455,9 @@ func newResEnv(t *testing.T, o resEnvOptions) *resEnv {
 	}
 	if o.reader != nil {
 		deps.Reader = o.reader(e.kube)
+	}
+	if o.logger != nil {
+		deps.Logger = o.logger
 	}
 	svc := applications.New(deps)
 	tbl := rest.NewTable()

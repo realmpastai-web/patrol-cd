@@ -47,6 +47,11 @@ type clusterTarget struct {
 // error stays out of the response: it can name credential Secrets and connection details.
 type userMessager interface{ UserMessage() string }
 
+// noCredentials is implemented by errors of a ClusterConfigs provider that holds no credentials for
+// a cluster by design (core mode with no kubeconfig context for it). Nothing was sent to the cluster,
+// and a call that can do without the cluster goes on.
+type noCredentials interface{ NoCredentials() }
+
 // clusterConfigUnavailable is the 503 for a destination cluster whose configuration cannot be
 // built. The cause is attached for the server log; it reaches the client only when it opts in
 // with UserMessage.

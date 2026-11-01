@@ -12,6 +12,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -145,29 +146,40 @@ func discoverAPIs(disco discovery.DiscoveryInterface, s *Settings, server string
 
 // servedAPIResources returns the server version and the served API resources of the cluster behind
 // disco: what GetServerVersion and GetAPIResources of its cache return. As in a full sync, group
-// versions whose discovery failed are left out.
-func servedAPIResources(disco discovery.DiscoveryInterface) (string, []APIResourceInfo, error) {
+// versions whose discovery failed are left out; the third value lists them.
+func servedAPIResources(disco discovery.DiscoveryInterface) (string, []APIResourceInfo, []UnavailableAPI, error) {
 	d, err := discoverAPIs(disco, &Settings{}, "")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return d.serverVersion, d.all, nil
+	return d.serverVersion, d.all, d.failures, nil
 }
 
 // DiscoverAPIResources is what a cache of the cluster behind cfg would report, for a caller that has
 // none: see servedAPIResources. The discovery client takes no context, so ctx reaches its requests
-// through the transport, and discoveryTimeout bounds them together.
-func DiscoverAPIResources(ctx context.Context, cfg *rest.Config) (string, []APIResourceInfo, error) {
+// through the transport, and discoveryTimeout bounds them together; a wait for a Retry-After is
+// above the transport, so only the request timeout bounds that. An answer ctx cut short is an
+// error, since what it cut would pass for group versions that failed. The connections of a
+// transport cfg holds are closed with the call: clusters.ApplyTuning builds one per configuration.
+func DiscoverAPIResources(ctx context.Context, cfg *rest.Config) (string, []APIResourceInfo, []UnavailableAPI, error) {
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
+	defer utilnet.CloseIdleConnectionsFor(cfg.Transport)
 	bounded := rest.CopyConfig(cfg)
 	bounded.WarningHandler = rest.NoWarnings{}
 	bounded.Wrap(func(rt http.RoundTripper) http.RoundTripper { return contextTransport{ctx: ctx, next: rt} })
 	disco, err := discovery.NewDiscoveryClientForConfig(bounded)
 	if err != nil {
-		return "", nil, fmt.Errorf("create discovery client: %w", err)
+		return "", nil, nil, fmt.Errorf("create discovery client: %w", err)
 	}
-	return servedAPIResources(disco)
+	version, resources, unavailable, err := servedAPIResources(disco)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, nil, fmt.Errorf("discover API resources: %w", err)
+	}
+	return version, resources, unavailable, nil
 }
 
 // contextTransport sends every request under ctx.

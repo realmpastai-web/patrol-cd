@@ -187,9 +187,10 @@ func (s *Service) manifestRequest(ctx context.Context, in renderInput, source v1
 // destinationVersions returns the Kubernetes version and API versions a preview renders with, so
 // that it gives what the controller applies. They are the status's, which the controller keeps. A
 // status without them, as on the in-cluster cluster, which has no object to hold them, or on a
-// Cluster with no Applications yet, sends the question to the destination, with the cluster's own
-// credentials as the controller's cache does. A destination the project does not permit is not
-// contacted.
+// Cluster with no Applications yet, sends the question to the destination, with the credentials the
+// server holds for the cluster and no service account of the project, as the controller's cache
+// does (in core mode, the caller's kubeconfig). A destination the project does not permit is not
+// contacted, nor is one the server has no credentials for: the render then has what the status holds.
 func (s *Service) destinationVersions(ctx context.Context, app *v1alpha1.Application, proj *v1alpha1.AppProject, st *settings.Settings, cluster *v1alpha1.Cluster) (string, []string, error) {
 	version, apis := cluster.Status.ServerVersion, cluster.Status.Info.APIVersions
 	if (version != "" && len(apis) > 0) || s.d.Resources.Clusters == nil {
@@ -204,14 +205,34 @@ func (s *Service) destinationVersions(ctx context.Context, app *v1alpha1.Applica
 		return version, apis, nil
 	}
 	target, err := s.appClusterConfig(ctx, app, proj, st, false)
+	var none noCredentials
+	if errors.As(err, &none) {
+		return version, apis, nil
+	}
 	if err != nil {
 		return "", nil, err
 	}
-	version, resources, err := cache.DiscoverAPIResources(ctx, target.config)
+	version, resources, unavailable, err := cache.DiscoverAPIResources(ctx, target.config)
 	if err != nil {
-		return "", nil, s.destinationError(ctx, "error getting server version", err)
+		return "", nil, s.discoveryError(ctx, err)
+	}
+	for _, u := range unavailable {
+		s.log().WarnContext(ctx, "applications: the destination did not describe an API version a preview renders without",
+			"server", target.cluster.Spec.Server, "group", u.GroupKind.Group, "version", u.Version, "error", u.Message)
 	}
 	return version, cache.APIVersionStrings(resources), nil
+}
+
+// discoveryError is the error of a preview whose destination did not give its versions. The caller
+// asked about the Application, so a status the destination answers with, a 403 or a 404, does not
+// become the answer to that question: the preview is unavailable.
+func (s *Service) discoveryError(ctx context.Context, err error) error {
+	err = s.destinationError(ctx, "error getting the destination's versions", err)
+	var e *rest.Error
+	if errors.As(err, &e) && e.Status != http.StatusServiceUnavailable {
+		return rest.Unavailable("%s", e.Detail).WithCause(e.Cause)
+	}
+	return err
 }
 
 // checkSourcesPermitted refuses to render repositories the project does not permit (an

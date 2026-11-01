@@ -118,9 +118,10 @@ type CoreConfig struct {
 	// Nil reads Secret patrol-internal-token with RestConfig.
 	InternalToken func(ctx context.Context) (string, error)
 	// DestinationConfig returns the caller's client configuration of a destination cluster
-	// for the resource routes (logs, events, live resources, actions), the cluster
-	// connection checks and rotate-auth; credentials stored in Cluster Secrets are never
-	// used. Nil serves only the in-cluster destination, with RestConfig.
+	// for the resource routes (logs, events, live resources, actions), the previews of a
+	// cluster whose status lacks its versions, the cluster connection checks and rotate-auth;
+	// credentials stored in Cluster Secrets are never used. Nil serves only the in-cluster
+	// destination, with RestConfig.
 	DestinationConfig func(ctx context.Context, c *v1alpha1.Cluster) (*krest.Config, error)
 	// SyncTimeout bounds the lazily started repository informers (default
 	// DefaultCoreSyncTimeout).

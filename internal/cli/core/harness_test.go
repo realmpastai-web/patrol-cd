@@ -252,6 +252,7 @@ type repoFake struct {
 	*clitest.FakeRepoServer
 	mu        sync.Mutex
 	manifests map[string][]string
+	rendered  *reposerverapi.ManifestRequest // the last render
 }
 
 func newRepoFake() *repoFake {
@@ -277,7 +278,16 @@ func (r *repoFake) manifestsFor(path string) []string {
 	return append([]string(nil), r.manifests[path]...)
 }
 
+func (r *repoFake) lastRender() *reposerverapi.ManifestRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rendered
+}
+
 func (r *repoFake) GenerateManifest(_ context.Context, req *reposerverapi.ManifestRequest) (*reposerverapi.ManifestResponse, error) {
+	r.mu.Lock()
+	r.rendered = req
+	r.mu.Unlock()
 	return &reposerverapi.ManifestResponse{Manifests: r.manifestsFor(req.Source.Path), Revision: fakeSHA(req.Revision), SourceType: "Directory"}, nil
 }
 
