@@ -18,7 +18,7 @@ All versions are pinned exactly in `ui/package.json`; `ui/pnpm-lock.yaml` is com
 | Build | Vite 7, `@vitejs/plugin-react`, TypeScript 5.9 (`strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`) |
 | UI | React 19, react-router 7 (data router, lazy route modules), @tanstack/react-query 5 |
 | Styling | CSS modules + CSS custom properties (no CSS framework), inline SVG icons |
-| Tests | vitest 3 + jsdom, @testing-library/react + user-event + jest-dom, MSW 2 |
+| Tests | vitest 4 + jsdom, @testing-library/react + user-event + jest-dom, MSW 2 |
 | Browser tests | Playwright (`ui/e2e`, `ui/playwright.config.ts`), not part of `pnpm test` |
 | Lint | ESLint 10 flat config: typescript-eslint (type-checked), jsx-a11y (strict), react-hooks |
 | API types | openapi-typescript 7 over `api/openapi/openapi.json` (`pnpm gen:api`) |
@@ -327,8 +327,9 @@ it on mount.
   naming it: unmocked requests, unhandled rejections and uncaught exceptions, `console.error`
   output (except the error-boundary output allow-listed per file and test in
   `ALLOWED_CONSOLE_ERRORS`; tests that expect an error spy with
-  `vi.spyOn(console, 'error').mockImplementation(...)`), and elements left in `document.body`
-  after `cleanup()`: UI mounted outside `render`/`renderApp` keeps its queries, streams and
+  `vi.spyOn(console, 'error').mockImplementation(...)`), errors jsdom reports, among them what
+  it does not implement (`src/test/guards.test.ts` pins these across vitest majors), and
+  elements left in `document.body` after `cleanup()`: UI mounted outside `render`/`renderApp` keeps its queries, streams and
   timers running after the test. The fetch underneath MSW refuses every request, so work that
   outlives its file cannot reach a real service on jsdom's origin `http://localhost:3000`
   ([2026-10-16 flake](../../verification/runs/2026-10-16-ui-flake.md)).
