@@ -8,6 +8,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,13 +110,38 @@ func (h *Handlers) settings() (*settings.Settings, error) {
 	return s, nil
 }
 
-// cookieOptions returns the session cookie attributes for r.
-func (h *Handlers) cookieOptions(r *http.Request, s *settings.Settings) auth.CookieOptions {
-	secure := h.d.Config.SecureCookies || (r != nil && r.TLS != nil)
-	if s != nil && strings.HasPrefix(strings.ToLower(s.URL()), "https://") {
+// CookieOptions returns the attributes of the session cookies on the response to r, for login,
+// renewal and clearing alike. Behind a TLS-terminating proxy the server sees plain HTTP, so an
+// https settings url sets Secure on every response, and an https additionalUrls entry on the
+// responses to its host name. s may be nil.
+func (c Config) CookieOptions(r *http.Request, s *settings.Settings) auth.CookieOptions {
+	secure := c.SecureCookies || (r != nil && r.TLS != nil)
+	if s != nil && (strings.HasPrefix(strings.ToLower(s.URL()), "https://") || httpsAdditionalURL(r, s)) {
 		secure = true
 	}
-	return auth.CookieOptions{Path: h.d.Config.BaseHRef, Secure: secure}
+	return auth.CookieOptions{Path: c.BaseHRef, Secure: secure}
+}
+
+// httpsAdditionalURL reports whether additionalUrls has an https entry for the host name of r,
+// whatever else is configured for that name. Ports are left out of the comparison: browsers omit
+// a default port from Host and some proxies drop any port, and a Secure cookie on a plain HTTP
+// port of that name fails where the operator sees it, unlike a missing Secure. A trailing dot on
+// the request host names the same host. An entry that does not parse only draws a settings
+// warning, so it is skipped here.
+func httpsAdditionalURL(r *http.Request, s *settings.Settings) bool {
+	if r == nil {
+		return false
+	}
+	host := strings.TrimSuffix((&url.URL{Host: r.Host}).Hostname(), ".")
+	return slices.ContainsFunc(s.AdditionalURLs(), func(entry string) bool {
+		u, err := url.Parse(entry)
+		return err == nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), host)
+	})
+}
+
+// cookieOptions returns the session cookie attributes for r.
+func (h *Handlers) cookieOptions(r *http.Request, s *settings.Settings) auth.CookieOptions {
+	return h.d.Config.CookieOptions(r, s)
 }
 
 func (h *Handlers) log() *slog.Logger { return h.d.Logger }

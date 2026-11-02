@@ -137,7 +137,6 @@ func newHarness(t *testing.T, register func(t *rest.Table), opts ...harnessOptio
 			Policy: func() rest.AuthPolicy {
 				return rest.AuthPolicy{AnonymousEnabled: h.anonymous.Load(), Scopes: rbac.DefaultScopes()}
 			},
-			Cookie: auth.CookieOptions{Path: "/"},
 		},
 		Enforcer: h.enforcer,
 		Auditor:  h.audit,

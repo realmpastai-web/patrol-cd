@@ -189,6 +189,10 @@ networkPolicy:
       podSelector: {matchLabels: {app.kubernetes.io/name: ingress-nginx}}
 ```
 
+Keep `url` on `https://` with this setup. patrol-server sees plain HTTP here, and the `url` setting
+is what makes it mark session cookies `Secure`. A host name listed in `additionalUrls` gets the same
+from an `https://` entry, but only on requests to that host name, on any port.
+
 TLS at patrol-server (re-encryption or passthrough at the proxy): keep `server.insecure:
 false`, use the `https` backend port (the chart selects it), set the controller's backend
 protocol to HTTPS (`nginx.ingress.kubernetes.io/backend-protocol: HTTPS`, or
@@ -201,8 +205,8 @@ protocol to HTTPS (`nginx.ingress.kubernetes.io/backend-protocol: HTTPS`, or
   self-signed certificate generated in memory at each start.
 
 Gateway API: `server.httproute.enabled: true` with `parentRefs` and `hostnames` (needs
-`gateway.networking.k8s.io/v1`). Terminate TLS at the Gateway and set `server.insecure: true`;
-with TLS at the server the Gateway also needs a BackendTLSPolicy (not rendered by the chart).
+`gateway.networking.k8s.io/v1`). Terminate TLS at the Gateway, set `server.insecure: true` and
+keep `url` on `https://`; with TLS at the server the Gateway also needs a BackendTLSPolicy (not rendered by the chart).
 
 The CLI talks plain HTTP/JSON; no separate gRPC host or gRPC-Web routing is needed.
 

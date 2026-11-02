@@ -138,6 +138,74 @@ func TestSSOLoginFlow(t *testing.T) {
 	assert.Equal(t, idp.srv.URL+"/logout?redirect="+url.QueryEscape(e.url), out.LogoutURL)
 }
 
+// TestSSOCookieAttributes: the state cookie, its clearing and the session cookie follow
+// Config.CookieOptions. Behind a TLS-terminating proxy the server sees plain HTTP and redirects to
+// a host the test does not serve, so the test brings the callback and the state cookie back itself.
+func TestSSOCookieAttributes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		url        string
+		additional string
+		host       string
+		secure     bool
+	}{
+		{name: "TLS terminated by a proxy", url: "https://patrol.example.com", secure: true},
+		{name: "plain HTTP"},
+		{name: "https additional url for the request host", url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.example.com", secure: true},
+		{name: "plain HTTP beside an https additional url", url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.internal"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			idp := newFakeIdP(t)
+			cm := defaultCM()
+			cm["oidc.config"] = idp.oidcConfig("")
+			if tc.url != "" {
+				cm["url"] = tc.url
+			}
+			if tc.additional != "" {
+				cm["additionalUrls"] = tc.additional
+			}
+			e := newEnv(t, envOptions{cm: cm, sso: &core.SSOConfig{}, baseHRef: "/patrol/"})
+			b := e.browser()
+			b.Jar = nil
+
+			req, _ := http.NewRequest(http.MethodGet, e.url+apiclient.PathAuthLogin, nil)
+			req.Host = tc.host
+			resp, err := b.Do(req)
+			require.NoError(t, err)
+			_ = readBody(t, resp)
+			require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+			state := cookieNamed(resp.Cookies(), authoidc.StateCookieName)
+			require.NotNil(t, state)
+			assert.Equal(t, tc.secure, state.Secure)
+			assert.Equal(t, "/patrol", state.Path)
+
+			resp, err = b.Get(resp.Header.Get("Location"))
+			require.NoError(t, err)
+			_ = readBody(t, resp)
+			require.Equal(t, http.StatusFound, resp.StatusCode)
+			callback, err := url.Parse(resp.Header.Get("Location"))
+			require.NoError(t, err)
+
+			req, _ = http.NewRequest(http.MethodGet, e.url+callback.RequestURI(), nil)
+			req.Host = tc.host
+			req.AddCookie(&http.Cookie{Name: state.Name, Value: state.Value})
+			resp, err = b.Do(req)
+			require.NoError(t, err)
+			body := readBody(t, resp)
+			require.Equal(t, http.StatusSeeOther, resp.StatusCode, body)
+			for _, name := range []string{authoidc.StateCookieName, auth.SessionCookieName} {
+				c := cookieNamed(resp.Cookies(), name)
+				require.NotNil(t, c, name)
+				assert.Equal(t, tc.secure, c.Secure, name)
+				assert.Equal(t, "/patrol", c.Path, name)
+			}
+		})
+	}
+}
+
 func TestSSOLoginErrors(t *testing.T) {
 	t.Parallel()
 	idp := newFakeIdP(t)

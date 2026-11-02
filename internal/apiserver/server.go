@@ -322,7 +322,7 @@ func (s *Server) buildHandler(t *rest.Table) (http.Handler, error) {
 		Authenticator: &rest.Authenticator{
 			Verifier:    verifier,
 			Policy:      s.authPolicy,
-			Cookie:      auth.CookieOptions{Path: s.cfg.BaseHRef, Secure: !s.cfg.Insecure},
+			Cookie:      s.cookieOptions,
 			DisableAuth: s.cfg.DisableAuth,
 			Logger:      s.log,
 		},
@@ -405,6 +405,11 @@ func (s *Server) authPolicy() rest.AuthPolicy {
 		sc = rbac.DefaultScopes()
 	}
 	return rest.AuthPolicy{AnonymousEnabled: st.AnonymousUserEnabled(), Scopes: sc}
+}
+
+// cookieOptions returns the session cookie attributes for r under the current settings.
+func (s *Server) cookieOptions(r *http.Request) auth.CookieOptions {
+	return s.cfg.Core.CookieOptions(r, s.deps.Settings.Current())
 }
 
 // trustedOrigins are url and additionalUrls (CSRF Origin/Referer check).

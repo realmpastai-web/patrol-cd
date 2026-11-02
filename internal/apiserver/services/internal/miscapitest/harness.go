@@ -317,7 +317,6 @@ func New(t *testing.T, o Options, build func(env *Env) []Registrar) *Env {
 				}
 				return apirest.AuthPolicy{AnonymousEnabled: st.AnonymousUserEnabled(), Scopes: sc}
 			},
-			Cookie: auth.CookieOptions{Path: "/"},
 		},
 		Enforcer: e.Enforcer,
 		Auditor:  e.Audit,

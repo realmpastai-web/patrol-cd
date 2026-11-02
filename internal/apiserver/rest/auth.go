@@ -34,12 +34,20 @@ type Authenticator struct {
 	// Policy returns the current authentication settings; nil means AuthPolicy{} with the
 	// default scopes.
 	Policy func() AuthPolicy
-	// Cookie configures the renewed session cookie (path and Secure attribute).
-	Cookie auth.CookieOptions
+	// Cookie returns the attributes of the session cookies on the response to a request (path
+	// and Secure attribute); nil means auth.CookieOptions{}.
+	Cookie func(*http.Request) auth.CookieOptions
 	// DisableAuth skips authentication (upstream --disable-auth); requests proceed with
 	// the anonymous identity and RBAC is not enforced.
 	DisableAuth bool
 	Logger      *slog.Logger
+}
+
+func (a *Authenticator) cookie(r *http.Request) auth.CookieOptions {
+	if a.Cookie == nil {
+		return auth.CookieOptions{}
+	}
+	return a.Cookie(r)
 }
 
 func (a *Authenticator) policy() AuthPolicy {
@@ -84,7 +92,7 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request, mod
 	}
 	if raw == "" {
 		if errors.Is(tokErr, auth.ErrInvalidToken) && src == TokenSourceCookie {
-			auth.ClearSessionCookie(w, r, a.Cookie)
+			auth.ClearSessionCookie(w, r, a.cookie(r))
 		}
 		return a.unauthenticated(mode, pol, src, tokErr)
 	}
@@ -101,7 +109,7 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request, mod
 			return nil, nil, Unavailable("authentication is temporarily unavailable").WithCause(err)
 		}
 		if src == TokenSourceCookie {
-			auth.ClearSessionCookie(w, r, a.Cookie)
+			auth.ClearSessionCookie(w, r, a.cookie(r))
 		}
 		return a.unauthenticated(mode, pol, src, err)
 	}
@@ -161,7 +169,7 @@ func (a *Authenticator) renew(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		w.Header().Set(apiclient.RenewTokenHeader, iss.Token)
 		return
 	}
-	if err := auth.SetSessionCookie(w, r, iss.Token, a.Cookie); err != nil {
+	if err := auth.SetSessionCookie(w, r, iss.Token, a.cookie(r)); err != nil {
 		a.log().LogAttrs(r.Context(), slog.LevelWarn, "set renewed session cookie failed",
 			slog.String("requestId", RequestID(r.Context())), slog.Any("error", err))
 	}
