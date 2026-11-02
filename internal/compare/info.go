@@ -102,10 +102,15 @@ func AppOf(r *cache.Resource, namespaceResources map[ResourceKey]*cache.Resource
 	return name
 }
 
+// appRecursive searches r and its owners, each object once. visited[key] is true while key is
+// on the current chain, so reaching it again is a cycle, and false once its owners led nowhere,
+// so a chain that shares that owner skips it. An owner that led nowhere has no path back to any
+// chain: the search that cleared it would have met the cycle. The start object can be older than
+// the copy in ns, so a cycle back to it answers with that copy's Application.
 func appRecursive(r *cache.Resource, ns map[ResourceKey]*cache.Resource, visited map[ResourceKey]bool) (string, bool) {
 	key := r.ResourceKey()
-	if visited[key] {
-		return InfoOf(r).AppName, false
+	if onChain, ok := visited[key]; ok {
+		return InfoOf(r).AppName, !onChain
 	}
 	visited[key] = true
 	if name := InfoOf(r).AppName; name != "" {
@@ -117,11 +122,11 @@ func appRecursive(r *cache.Resource, ns map[ResourceKey]*cache.Resource, visited
 		if !ok {
 			continue
 		}
-		branch := maps.Clone(visited)
-		if app, ok := appRecursive(parent, ns, branch); app != "" || !ok {
+		if app, ok := appRecursive(parent, ns, visited); app != "" || !ok {
 			return app, ok
 		}
 	}
+	visited[key] = false
 	return "", true
 }
 

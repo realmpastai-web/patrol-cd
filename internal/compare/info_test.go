@@ -1,7 +1,9 @@
 package compare
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -574,6 +576,126 @@ func TestPopulateResourceInfoAttribution(t *testing.T) {
 	info, _ = pop(deploy, true)
 	require.NotNil(t, info.(*ResourceInfo).Health)
 	assert.Equal(t, health.StatusHealthy, info.(*ResourceInfo).Health.Status)
+}
+
+// ownerGraph builds ConfigMaps in one namespace from each object's owners, in order, and from
+// the Application each tracked object belongs to.
+func ownerGraph(owners map[string][]string, apps map[string]string) map[ResourceKey]*cache.Resource {
+	ns := map[ResourceKey]*cache.Resource{}
+	add := func(name string) {
+		key := cache.NewResourceKey("", "ConfigMap", "ns", name)
+		if _, ok := ns[key]; !ok {
+			ns[key] = &cache.Resource{Ref: cache.ResourceRef{ResourceKey: key}, Info: &ResourceInfo{AppName: apps[name]}}
+		}
+	}
+	for name, refs := range owners {
+		add(name)
+		for _, owner := range refs {
+			add(owner)
+			r := ns[cache.NewResourceKey("", "ConfigMap", "ns", name)]
+			r.OwnerRefs = append(r.OwnerRefs, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: owner})
+		}
+	}
+	return ns
+}
+
+func TestAppOfOwnerGraphs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		owners map[string][]string
+		apps   map[string]string
+		want   string
+	}{
+		{
+			name:   "an owner shared by two chains is not a cycle",
+			owners: map[string][]string{"r": {"a", "b"}, "a": {"c"}, "b": {"c", "d"}},
+			apps:   map[string]string{"d": "app"},
+			want:   "app",
+		},
+		{
+			name:   "the first chain that reaches a tracked object decides",
+			owners: map[string][]string{"r": {"a", "b"}, "a": {"c"}, "b": {"d"}},
+			apps:   map[string]string{"c": "first", "d": "second"},
+			want:   "first",
+		},
+		{
+			name:   "no owner is tracked",
+			owners: map[string][]string{"r": {"a", "b"}, "a": {"c"}, "b": {"c"}},
+		},
+		{
+			name:   "a cycle stops the walk before a later owner",
+			owners: map[string][]string{"r": {"a", "d"}, "a": {"b"}, "b": {"a"}},
+			apps:   map[string]string{"d": "app"},
+		},
+		{
+			name:   "a cycle after a shared owner stops the walk",
+			owners: map[string][]string{"r": {"a", "b", "d"}, "a": {"c"}, "b": {"c", "e"}, "e": {"b"}},
+			apps:   map[string]string{"d": "app"},
+		},
+		{
+			name:   "a cycle after an owner that led nowhere stops the walk",
+			owners: map[string][]string{"r": {"a", "d"}, "a": {"x", "b"}, "b": {"a"}},
+			apps:   map[string]string{"d": "app"},
+		},
+		{
+			name:   "a cycle through the first object stops the walk",
+			owners: map[string][]string{"r": {"a", "d"}, "a": {"r"}},
+			apps:   map[string]string{"d": "app"},
+		},
+		{
+			name:   "an object that owns itself stops the walk",
+			owners: map[string][]string{"r": {"r", "d"}},
+			apps:   map[string]string{"d": "app"},
+		},
+		{
+			name:   "a tracked object ends the chain before its own cycle",
+			owners: map[string][]string{"r": {"a"}, "a": {"b"}, "b": {"a"}},
+			apps:   map[string]string{"a": "app"},
+			want:   "app",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ns := ownerGraph(tc.owners, tc.apps)
+			assert.Equal(t, tc.want, AppOf(ns[cache.NewResourceKey("", "ConfigMap", "ns", "r")], ns))
+		})
+	}
+
+	// An owner outside the namespace map is skipped.
+	ns := ownerGraph(map[string][]string{"r": {"gone", "d"}}, map[string]string{"d": "app"})
+	delete(ns, cache.NewResourceKey("", "ConfigMap", "ns", "gone"))
+	assert.Equal(t, "app", AppOf(ns[cache.NewResourceKey("", "ConfigMap", "ns", "r")], ns))
+
+	// An update starts from the old object, and a cycle leads back to its tracked copy in the map.
+	ns = ownerGraph(map[string][]string{"r": {"a"}, "a": {"r"}}, map[string]string{"r": "app"})
+	tracked := ns[cache.NewResourceKey("", "ConfigMap", "ns", "r")]
+	old := &cache.Resource{Ref: tracked.Ref, OwnerRefs: tracked.OwnerRefs, Info: &ResourceInfo{}}
+	assert.Equal(t, "app", AppOf(old, ns))
+}
+
+// TestAppOfLayeredOwners: both objects of a layer own both objects of the layer below, so the
+// chains double with every layer while the objects grow by two. The walk has to search them
+// all before it reaches the tracked owner, which only finishes if it visits each object once.
+func TestAppOfLayeredOwners(t *testing.T) {
+	t.Parallel()
+	const layers = 64
+	owners := map[string][]string{"r": {"a0", "d"}}
+	for i := range layers - 1 {
+		next := []string{fmt.Sprintf("a%d", i+1), fmt.Sprintf("b%d", i+1)}
+		owners[fmt.Sprintf("a%d", i)] = next
+		owners[fmt.Sprintf("b%d", i)] = next
+	}
+	ns := ownerGraph(owners, map[string]string{"d": "app"})
+	got := make(chan string, 1)
+	go func() { got <- AppOf(ns[cache.NewResourceKey("", "ConfigMap", "ns", "r")], ns) }()
+	select {
+	case name := <-got:
+		assert.Equal(t, "app", name)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the walk did not finish")
+	}
 }
 
 func TestAppOfAndSkipResourceUpdate(t *testing.T) {
