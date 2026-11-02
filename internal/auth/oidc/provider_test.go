@@ -401,10 +401,12 @@ func TestKeySetLimits(t *testing.T) {
 	}
 }
 
-// TestKeySetLimitsCachedKey: a key the provider already holds does not need the set, so
-// a refused key published later only shows when the keys are fetched, as by a new process.
+// TestKeySetLimitsCachedKey: a key the provider already holds does not need the set, so a
+// refused key published later only shows when the keys are fetched: by a new process, or
+// after a rotation, whose re-discovery starts with an empty cache and so loses the old key.
 func TestKeySetLimitsCachedKey(t *testing.T) {
 	t.Parallel()
+	const tooLarge = "go-jose/go-jose: invalid RSA key, modulus too large"
 	f := newFakeIdP(t)
 	p := newTestProvider(t, f, nil)
 	ctx := context.Background()
@@ -416,9 +418,21 @@ func TestKeySetLimitsCachedKey(t *testing.T) {
 	if _, err := p.VerifyIDToken(ctx, raw); err != nil {
 		t.Fatalf("cached key: %v", err)
 	}
-	if _, err := newTestProvider(t, f, nil).VerifyIDToken(ctx, raw); !errors.Is(err, ErrIDTokenInvalid) {
-		t.Fatalf("new process: err = %v, want %v", err, ErrIDTokenInvalid)
+	refused := func(name string, p *Provider, raw string) {
+		t.Helper()
+		if _, err := p.VerifyIDToken(ctx, raw); !errors.Is(err, ErrIDTokenInvalid) || !strings.Contains(fmt.Sprint(err), tooLarge) {
+			t.Errorf("%s: err = %v, want %q", name, err, tooLarge)
+		}
 	}
+	refused("new process", newTestProvider(t, f, nil), raw)
+
+	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *fakeIdP) { f.key, f.kid = newKey, "key-2" })
+	refused("rotated key", p, f.signIDToken("u", "", "", nil))
+	refused("key cached before the rotation", p, raw)
 }
 
 func TestProviderTLSConfig(t *testing.T) {

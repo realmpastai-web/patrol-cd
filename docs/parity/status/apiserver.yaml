@@ -351,11 +351,13 @@ TEN-127:
   tests:
     - internal/apiserver/core/sso_test.go:TestSSOLoginFlow
     - internal/apiserver/core/sso_test.go:TestSSOLoginErrors
+    - internal/apiserver/core/sso_test.go:TestSSOKeySetRefused
     - internal/auth/oidc/provider_test.go:TestKeySetLimits
   notes: >-
     Authorization-code flow with state, nonce and optional PKCE; the browser gets a Patrol SSO
-    session cookie (ADR-0009). Implicit flow and ARGOCD_SSO_DEBUG are not supported. A key set
-    go-jose refuses fails the login; the difference from v3.5.5 is under TEN-128.
+    session cookie (ADR-0009). Implicit flow and ARGOCD_SSO_DEBUG are not supported. An ID token
+    that fails verification answers 401 where v3.5.5 answers 500 (docs/architecture/components/auth.md).
+    A key set go-jose refuses fails the login; the difference from v3.5.5 is under TEN-128.
 
 TEN-128:
   status: in-progress

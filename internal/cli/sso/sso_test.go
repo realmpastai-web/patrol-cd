@@ -179,6 +179,16 @@ func TestLoginKeySetRefused(t *testing.T) {
 			t.Errorf("%s: err = %v, want %q", name, err, want)
 		}
 	}
+
+	// The refresh token was redeemed before the ID token was verified, so on an IdP that
+	// rotates them fixing the key set does not bring the session back: only a login does.
+	idp.SetExtraJWK(nil)
+	if _, err := sso.Refresh(t.Context(), provider(idp), nil, res.RefreshToken); err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("refresh after the fix: err = %v, want invalid_grant", err)
+	}
+	if _, err := sso.Login(t.Context(), provider(idp), opts); err != nil {
+		t.Errorf("login after the fix: %v", err)
+	}
 }
 
 func TestLoginTimeoutAndCancel(t *testing.T) {

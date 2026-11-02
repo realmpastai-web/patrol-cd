@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -164,6 +165,39 @@ func TestSSOLoginErrors(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, readBody(t, resp))
 	_, err = plain.client("").ExchangeOIDCToken(context.Background(), &apiclient.OIDCExchangeRequest{IDToken: "a.b.c"})
 	assert.Equal(t, http.StatusNotFound, apiErr(t, err).StatusCode)
+}
+
+// TestSSOKeySetRefused pins the answer to an ID token that fails verification, here because
+// go-jose refuses the key set: a 401 without the reason, where v3.5.5 answers 500.
+func TestSSOKeySetRefused(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIdP(t)
+	idp.mu.Lock()
+	idp.extraJWK = map[string]any{
+		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "unused", "e": "AQAB",
+		"n": base64.RawURLEncoding.EncodeToString(new(big.Int).Lsh(big.NewInt(1), 4096).Bytes()), // 4097 bits
+	}
+	idp.mu.Unlock()
+	e := ssoEnv(t, idp, "")
+	b := e.browser()
+
+	resp, err := b.Get(e.url + apiclient.PathAuthLogin)
+	require.NoError(t, err)
+	_ = readBody(t, resp)
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	resp, err = b.Get(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	_ = readBody(t, resp)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	resp, err = b.Get(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	body := readBody(t, resp)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, body)
+	assert.Contains(t, body, "ID token verification failed")
+	assert.NotContains(t, body, "go-jose")
+	assert.Nil(t, cookieNamed(resp.Cookies(), auth.SessionCookieName))
+	assert.GreaterOrEqual(t, e.loginCount("sso", "failure"), float64(1))
 }
 
 func TestOIDCExchange(t *testing.T) {
