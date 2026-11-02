@@ -96,9 +96,10 @@ count for none (DIFF-037). The Application whose root object (tracked, no owners
 a recent comparison; one whose descendant changed gets a tree-only refresh (tree rebuilt from
 the managed resources of the last comparison, `summary` and `OrphanedResourceWarning`
 persisted; falls back to a recent comparison after a restart). The changed Application object
-itself (same UID: an Application of that name on a destination cluster is another object) and
-Applications outside the allowed namespaces are skipped. A namespaced object
-attributed to no Application gives a tree-only refresh to the Applications that monitor
+itself (same UID: an Application of that name on a destination cluster is another object),
+Applications outside the allowed namespaces and tracking values no Application can have
+(tracking metadata can hold any string) are skipped. A namespaced object attributed to no
+Application gives a tree-only refresh to the Applications that monitor
 orphaned resources in its namespace on the same cluster (APP-085, DIFF-078; an object tracked
 by an Application that does not exist counts as an orphan in a tree build, as upstream, but its
 event is attributed and refreshes no monitor): two in-memory

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -160,6 +161,8 @@ func TestOnResourceUpdated(t *testing.T) {
 			want: map[types.NamespacedName]requested{appKey("a"): recentReq}},
 		{name: "root tracking moved to another application", newRes: cm("b", "2"), oldRes: cm("a", "1"),
 			want: map[types.NamespacedName]requested{appKey("a"): recentReq, appKey("b"): recentReq}},
+		{name: "root tracking overwritten with a value no application can have", newRes: cm("Not A Name", "2"), oldRes: cm("a", "1"),
+			want: map[types.NamespacedName]requested{appKey("a"): recentReq}},
 		{name: "descendant moved to another application", newRes: podOf("rs-b", nil), oldRes: podOf("rs-a", nil),
 			want: map[types.NamespacedName]requested{appKey("a"): treeReq, appKey("b"): treeReq}},
 		{name: "managed root deleted", oldRes: cm("a", "1"),
@@ -345,6 +348,70 @@ func TestLiveRefreshLogLevel(t *testing.T) {
 	}
 }
 
+// TestOnResourceUpdatedInstanceNames covers tracking values no Application can have: they are
+// neither queued nor logged, in the control-plane namespace or in an allowed one, whether the
+// changed object is the tracked root or a descendant of it.
+func TestOnResourceUpdatedInstanceNames(t *testing.T) {
+	t.Parallel()
+	longest, tooLong := strings.Repeat("a", 253), strings.Repeat("a", 254)
+	longestNamespace, tooLongNamespace := strings.Repeat("n", 63), strings.Repeat("n", 64)
+	type resources = map[cache.ResourceKey]*cache.Resource
+
+	for _, path := range []struct {
+		name   string
+		req    requested
+		events func(instance string) (newRes, oldRes *cache.Resource, ns resources)
+	}{
+		{name: "root", req: recentReq, events: func(instance string) (*cache.Resource, *cache.Resource, resources) {
+			cm := func(hash string) *cache.Resource {
+				return liveRes("", "ConfigMap", "web", "cm", &compare.ResourceInfo{AppName: instance, ManifestHash: hash})
+			}
+			return cm("2"), cm("1"), nil
+		}},
+		{name: "descendant", req: treeReq, events: func(instance string) (*cache.Resource, *cache.Resource, resources) {
+			dep := liveRes("apps", "Deployment", "web", "d", &compare.ResourceInfo{AppName: instance, ManifestHash: "d"})
+			pod := liveRes("", "Pod", "web", "p", nil, ownedBy("apps/v1", "Deployment", "d"))
+			return pod, pod, nsResources(dep)
+		}},
+	} {
+		for _, tc := range []struct {
+			name     string
+			instance string
+			want     types.NamespacedName // zero: skipped
+		}{
+			{name: "longest name", instance: longest, want: appKey(longest)},
+			{name: "name with dots", instance: "web.prod", want: appKey("web.prod")},
+			{name: "allowed namespace", instance: "team_a", want: types.NamespacedName{Namespace: "team", Name: "a"}},
+			{name: "longest namespace", instance: longestNamespace + "_a", want: types.NamespacedName{Namespace: longestNamespace, Name: "a"}},
+			{name: "name too long", instance: tooLong},
+			{name: "name too long in an allowed namespace", instance: "team_" + tooLong},
+			{name: "name with invalid characters", instance: "Not A Name"},
+			{name: "name with a second separator", instance: "team_a_b"},
+			{name: "empty name", instance: "team_"},
+			{name: "namespace too long", instance: tooLongNamespace + "_a"},
+			{name: "namespace with invalid characters", instance: "te.am_a"},
+			{name: "empty namespace", instance: "_a"},
+		} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				r := liveEventsReconciler(t, nil)
+				r.cfg.Params.ApplicationNamespaces = []string{"*"}
+				h := &recordingHandler{}
+				r.log = slog.New(h)
+				newRes, oldRes, ns := path.events(tc.instance)
+				r.onResourceUpdated(testServer, newRes, oldRes, ns)
+				if tc.want == (types.NamespacedName{}) {
+					assert.Empty(t, pendingRequests(r.refresh))
+					assert.Empty(t, h.records)
+					return
+				}
+				assert.Equal(t, map[types.NamespacedName]requested{tc.want: path.req}, pendingRequests(r.refresh))
+				assert.Len(t, h.records, 1)
+			})
+		}
+	}
+}
+
 func TestRefreshOrphanMonitors(t *testing.T) {
 	t.Parallel()
 	project := func(name string, monitor bool) *v1alpha1.AppProject {
@@ -434,6 +501,10 @@ func TestRefreshOrphanMonitors(t *testing.T) {
 		{name: "object of an application outside the allowed namespaces",
 			newRes: liveRes("", "ConfigMap", "web", "theirs", &compare.ResourceInfo{AppName: "team_x", ManifestHash: "2"}),
 			oldRes: liveRes("", "ConfigMap", "web", "theirs", &compare.ResourceInfo{AppName: "team_x", ManifestHash: "1"}),
+			want:   map[types.NamespacedName]requested{}},
+		{name: "object with a tracking value no application can have",
+			newRes: liveRes("", "ConfigMap", "web", "theirs", &compare.ResourceInfo{AppName: "Not A Name", ManifestHash: "2"}),
+			oldRes: liveRes("", "ConfigMap", "web", "theirs", &compare.ResourceInfo{AppName: "Not A Name", ManifestHash: "1"}),
 			want:   map[types.NamespacedName]requested{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
