@@ -314,6 +314,19 @@ func TestGetManifestsDestinationVersions(t *testing.T) {
 		})
 	}
 
+	t.Run("a destination that redirects is not followed", func(t *testing.T) {
+		re := env(t, resEnvOptions{}, v1alpha1.ClusterStatus{})
+		var followed atomic.Int64
+		other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Add(1) }))
+		t.Cleanup(other.Close)
+		srv := httptest.NewServer(http.RedirectHandler(other.URL+"/version", http.StatusFound))
+		t.Cleanup(srv.Close)
+		re.configs.host = srv.URL
+		_, err := get(re)
+		requireProblem(t, err, 503, "error getting the destination's versions: the destination cluster is not reachable")
+		assert.Zero(t, followed.Load())
+	})
+
 	t.Run("a group version the destination does not describe is left out, and logged", func(t *testing.T) {
 		logs := &logBuffer{}
 		re := env(t, resEnvOptions{logger: slog.New(slog.NewTextHandler(logs, nil))}, v1alpha1.ClusterStatus{})
@@ -343,7 +356,7 @@ func TestGetManifestsDestinationVersions(t *testing.T) {
 		assert.Equal(t, "v1.30.2", gen.KubeVersion)
 		assert.Equal(t, []string{"v1", "v1/ConfigMap"}, gen.APIVersions)
 		assert.Contains(t, logs.String(), "group=down.example")
-		assert.Contains(t, logs.String(), "server="+edge)
+		assert.Contains(t, logs.String(), "cluster=edge")
 	})
 
 	for name, status := range map[string]v1alpha1.ClusterStatus{
@@ -518,6 +531,24 @@ func TestValidationRendersWithTheStatus(t *testing.T) {
 	assert.Equal(t, "dry", gen.Source.Path)
 	assert.Empty(t, gen.KubeVersion)
 	assert.Empty(t, gen.APIVersions)
+
+	// A preview would ask the destination here.
+	const unreported = "https://unreported.example.com"
+	re.updateProject("proj-a", func(p *v1alpha1.AppProject) {
+		p.Spec.Destinations = append(p.Spec.Destinations, v1alpha1.ApplicationDestination{Server: unreported, Namespace: "*"})
+	})
+	partial := &v1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "unreported", Namespace: re.ns}, Spec: v1alpha1.ClusterSpec{Server: unreported, Name: "unreported"}}
+	require.NoError(t, re.kube.Create(re.ctx, partial))
+	partial.Status = v1alpha1.ClusterStatus{ServerVersion: "v9.9.8"}
+	require.NoError(t, re.kube.Status().Update(re.ctx, partial))
+	app := re.newApp("unreported", "proj-a")
+	app.Spec.Destination.Server = unreported
+	_, err = re.rclient("alice").CreateApplication(re.ctx, &apiclient.ApplicationCreateRequest{Application: app})
+	require.NoError(t, err)
+	gen = re.repo.lastGenerate()
+	assert.Equal(t, "v9.9.8", gen.KubeVersion)
+	assert.Empty(t, gen.APIVersions)
+
 	assert.Zero(t, re.configs.calls.Load(), "no configuration of the destination")
 }
 

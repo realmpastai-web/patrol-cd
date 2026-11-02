@@ -365,6 +365,9 @@ API-020:
     - internal/cache/discovery_test.go:TestServedAPIResources
     - internal/cache/discovery_test.go:TestDiscoverAPIResources
     - internal/cache/discovery_test.go:TestDiscoverAPIResourcesStopsWithItsContext
+    - internal/cache/discovery_test.go:TestDiscoverAPIResourcesStopsAWaitForItsLimiter
+    - internal/cache/discovery_test.go:TestDiscoverAPIResourcesStopsAtAWaitThatCannotEndInTime
+    - internal/cache/discovery_test.go:TestDiscoverAPIResourcesRefusesRedirects
     - internal/cache/discovery_test.go:TestDiscoverAPIResourcesReportsAnAnswerItsContextCut
     - internal/cache/discovery_test.go:TestDiscoverAPIResourcesClosesItsConnections
     - internal/cli/core/e2e_test.go:TestCorePreviewVersions
@@ -377,7 +380,10 @@ API-020:
     and from the destination, with the credentials the server holds for the cluster (in core mode
     the caller's kubeconfig), only when the status lacks one, where upstream always asks it. A
     destination the project does not permit is not contacted, nor, in core mode, one the kubeconfig
-    has no context for, and the render then has what the status holds.
+    has no context for, and the render then has what the status holds. The question impersonates no
+    service account, unlike upstream's, so that the render has what the controller's cache reports;
+    SYNC-114 stays not started. A failure is a 503 with one message for both of upstream's steps,
+    and a redirect is refused.
 
 API-025:
   status: implemented

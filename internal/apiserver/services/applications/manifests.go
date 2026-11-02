@@ -218,7 +218,7 @@ func (s *Service) destinationVersions(ctx context.Context, app *v1alpha1.Applica
 	}
 	for _, u := range unavailable {
 		s.log().WarnContext(ctx, "applications: the destination did not describe an API version a preview renders without",
-			"server", target.cluster.Spec.Server, "group", u.GroupKind.Group, "version", u.Version, "error", u.Message)
+			"cluster", target.cluster.Spec.Name, "group", u.GroupKind.Group, "version", u.Version, "error", u.Message)
 	}
 	return version, cache.APIVersionStrings(resources), nil
 }

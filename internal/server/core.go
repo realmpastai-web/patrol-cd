@@ -466,8 +466,19 @@ func (a *coreAssembly) inClusterOnly(_ context.Context, c *v1alpha1.Cluster) (*k
 	if c != nil {
 		server = c.Spec.Server
 	}
-	return nil, fmt.Errorf("core mode: no kubeconfig credentials for destination cluster %s", server)
+	return nil, &noDestinationConfig{server: server}
 }
+
+// noDestinationConfig is the error of a destination inClusterOnly does not serve.
+type noDestinationConfig struct{ server string }
+
+func (e *noDestinationConfig) Error() string {
+	return "core mode: no kubeconfig credentials for destination cluster " + e.server
+}
+
+// NoCredentials says that nothing is wrong with the destination: core mode has no way to reach it,
+// as it has none for a kubeconfig without a context for it.
+func (e *noDestinationConfig) NoCredentials() {}
 
 // treeClient routes tree API calls as patrol-server does: a fixed URL, or the replica
 // holding the shard of the Application's destination cluster (status.assignedShard, else

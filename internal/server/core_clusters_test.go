@@ -76,6 +76,23 @@ func (rt handlerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error)
 // manager service account on the destination cluster). With a kubeconfig context for the
 // server, the connection check and the rotation use the caller's credentials; without one,
 // nothing is sent to the cluster: the update proceeds unchecked and rotate-auth is refused.
+// With no provider, a destination other than the in-cluster one is one core mode has no credentials
+// for, which a preview renders without.
+func TestCoreInClusterOnly(t *testing.T) {
+	t.Parallel()
+	a := &coreAssembly{restCfg: &krest.Config{Host: "https://kubernetes.default.svc"}}
+	cfg, err := a.inClusterOnly(t.Context(), &v1alpha1.Cluster{Spec: v1alpha1.ClusterSpec{Server: v1alpha1.KubernetesInternalAPIServerAddr}})
+	require.NoError(t, err)
+	assert.Equal(t, a.restCfg.Host, cfg.Host)
+
+	var none interface{ NoCredentials() }
+	_, err = a.inClusterOnly(t.Context(), &v1alpha1.Cluster{Spec: v1alpha1.ClusterSpec{Server: "https://edge.example.com"}})
+	require.ErrorAs(t, err, &none)
+	assert.ErrorContains(t, err, "https://edge.example.com")
+	_, err = a.inClusterOnly(t.Context(), nil)
+	require.ErrorAs(t, err, &none)
+}
+
 func TestCoreClusterConnectionsUseCallerCredentials(t *testing.T) {
 	requireEnvtest(t)
 	cfg := krest.CopyConfig(testCfg)

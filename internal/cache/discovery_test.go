@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	k8sversion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/juliosaraiva/patrol-cd/internal/clusters"
 )
@@ -339,6 +341,115 @@ func TestDiscoverAPIResourcesStopsWithItsContext(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the discovery outlived its context")
+	}
+}
+
+// waitingLimiter holds a request until the context of its wait ends.
+type waitingLimiter struct {
+	flowcontrol.RateLimiter
+	waiting chan struct{}
+	once    sync.Once
+	stopped atomic.Bool
+}
+
+func (l *waitingLimiter) Wait(ctx context.Context) error {
+	l.once.Do(func() { close(l.waiting) })
+	select {
+	case <-ctx.Done():
+		l.stopped.Store(true)
+		return ctx.Err()
+	case <-time.After(10 * time.Second):
+		return errors.New("a wait the context did not reach")
+	}
+}
+
+// The limiter comes before the transport and gets the discovery client's context.TODO(): the request's
+// context still has to reach it, or a discovery of many group versions outlives a reader who gave up.
+func TestDiscoverAPIResourcesStopsAWaitForItsLimiter(t *testing.T) {
+	t.Parallel()
+	limiter := &waitingLimiter{RateLimiter: flowcontrol.NewFakeAlwaysRateLimiter(), waiting: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		<-limiter.waiting
+		cancel()
+	}()
+	_, _, _, err := DiscoverAPIResources(ctx, &rest.Config{Host: discoveryServer(t).URL, RateLimiter: limiter})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.True(t, limiter.stopped.Load(), "the wait ended with the context")
+}
+
+// The limiter refuses a wait longer than what is left of the discovery, and the others would go on to
+// an answer without that group version.
+func TestDiscoverAPIResourcesStopsAtAWaitThatCannotEndInTime(t *testing.T) {
+	t.Parallel()
+	groups := make([]string, 50)
+	for i := range groups {
+		groups[i] = fmt.Sprintf("g%d.example", i)
+	}
+	srv := httptest.NewServer(discoveryHandler(groups...))
+	t.Cleanup(srv.Close)
+
+	start := time.Now()
+	_, resources, _, err := DiscoverAPIResources(t.Context(), &rest.Config{Host: srv.URL, QPS: 1, Burst: 3})
+	require.ErrorContains(t, err, "exceed context deadline")
+	assert.Empty(t, resources)
+	assert.Less(t, time.Since(start), 10*time.Second, "the call stops at the first such wait")
+}
+
+func TestDiscoveryLimiter(t *testing.T) {
+	t.Parallel()
+	own := flowcontrol.NewTokenBucketRateLimiter(3, 1)
+	for name, tt := range map[string]struct {
+		cfg rest.Config
+		qps float32
+	}{
+		"no limits, as a cache of the cluster": {rest.Config{}, defaultQPS},
+		"its limits":                           {rest.Config{QPS: 7, Burst: 9}, 7},
+		"a QPS alone":                          {rest.Config{QPS: 7}, 7},
+		"its limiter":                          {rest.Config{QPS: 7, RateLimiter: own}, 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			limiter := discoveryLimiter(t.Context(), func(error) {}, &tt.cfg)
+			assert.InDelta(t, tt.qps, limiter.QPS(), 0.001)
+			assert.True(t, limiter.TryAccept(), "a request gets through")
+		})
+	}
+	assert.Nil(t, discoveryLimiter(t.Context(), func(error) {}, &rest.Config{QPS: -1}), "client-go has none either")
+}
+
+// A cluster's credentials stay with its server: as on a connection check, a redirect ends there,
+// whether it is the discovery that needs the answer or one group version.
+func TestDiscoverAPIResourcesRefusesRedirects(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"/version", "/apis/moved.example/v1"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			var followed atomic.Int64
+			other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Add(1) }))
+			t.Cleanup(other.Close)
+			docs := discoveryHandler("moved.example", "example.com")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == path {
+					http.Redirect(w, r, other.URL+path, http.StatusFound)
+					return
+				}
+				docs.ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+
+			_, _, unavailable, err := DiscoverAPIResources(t.Context(), &rest.Config{Host: srv.URL, BearerToken: "made-up"})
+			if path == "/version" {
+				require.ErrorIs(t, err, clusters.ErrRedirect)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, unavailable, 1)
+				assert.Equal(t, "moved.example", unavailable[0].GroupKind.Group)
+				assert.Contains(t, unavailable[0].Message, clusters.ErrRedirect.Error())
+			}
+			assert.Zero(t, followed.Load(), "the redirect was followed")
+		})
 	}
 }
 

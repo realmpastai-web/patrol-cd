@@ -16,6 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
+
+	"github.com/juliosaraiva/patrol-cd/internal/clusters"
 )
 
 // discoveryResult is one snapshot of the cluster's served APIs. It is immutable once built.
@@ -157,29 +160,69 @@ func servedAPIResources(disco discovery.DiscoveryInterface) (string, []APIResour
 
 // DiscoverAPIResources is what a cache of the cluster behind cfg would report, for a caller that has
 // none: see servedAPIResources. The discovery client takes no context, so ctx reaches its requests
-// through the transport, and discoveryTimeout bounds them together; a wait for a Retry-After is
-// above the transport, so only the request timeout bounds that. An answer ctx cut short is an
-// error, since what it cut would pass for group versions that failed. The connections of a
-// transport cfg holds are closed with the call: clusters.ApplyTuning builds one per configuration.
+// through the transport and their rate limit through the limiter, and discoveryTimeout bounds them
+// together; a wait for a Retry-After is above the transport, so only the request timeout bounds
+// that. An answer ctx cut short is an error, since what it cut would pass for group versions that
+// failed. A redirect is refused, as on a connection check. The connections of a transport cfg holds
+// are closed with the call: clusters.ApplyTuning builds one per configuration.
 func DiscoverAPIResources(ctx context.Context, cfg *rest.Config) (string, []APIResourceInfo, []UnavailableAPI, error) {
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
 	defer utilnet.CloseIdleConnectionsFor(cfg.Transport)
 	bounded := rest.CopyConfig(cfg)
 	bounded.WarningHandler = rest.NoWarnings{}
+	bounded.RateLimiter = discoveryLimiter(ctx, stop, cfg)
+	bounded.Wrap(clusters.RefuseRedirects)
 	bounded.Wrap(func(rt http.RoundTripper) http.RoundTripper { return contextTransport{ctx: ctx, next: rt} })
 	disco, err := discovery.NewDiscoveryClientForConfig(bounded)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("create discovery client: %w", err)
 	}
 	version, resources, unavailable, err := servedAPIResources(disco)
+	if ctx.Err() != nil {
+		return "", nil, nil, fmt.Errorf("discover API resources: %w", context.Cause(ctx))
+	}
 	if err != nil {
 		return "", nil, nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return "", nil, nil, fmt.Errorf("discover API resources: %w", err)
-	}
 	return version, resources, unavailable, nil
+}
+
+// discoveryLimiter is the rate limiter of cfg, or the one newClients gives a configuration with
+// none, waiting under ctx. It is nil where client-go has none, for a negative QPS.
+func discoveryLimiter(ctx context.Context, stop context.CancelCauseFunc, cfg *rest.Config) flowcontrol.RateLimiter {
+	limiter := cfg.RateLimiter
+	if limiter == nil {
+		qps, burst := cfg.QPS, cfg.Burst
+		if qps == 0 {
+			qps, burst = defaultQPS, defaultBurst
+		}
+		if qps < 0 {
+			return nil
+		}
+		limiter = flowcontrol.NewTokenBucketRateLimiter(qps, cmp.Or(burst, defaultBurst))
+	}
+	return contextLimiter{RateLimiter: limiter, ctx: ctx, stop: stop}
+}
+
+// contextLimiter waits under ctx: the discovery client's requests carry context.TODO(), and the
+// limiter comes before the transport. A wait that cannot end in time stops the call, because the
+// group version it holds up would pass for one that failed.
+type contextLimiter struct {
+	flowcontrol.RateLimiter
+	ctx  context.Context
+	stop context.CancelCauseFunc
+}
+
+// Wait implements flowcontrol.RateLimiter.
+func (l contextLimiter) Wait(context.Context) error {
+	err := l.RateLimiter.Wait(l.ctx)
+	if err != nil {
+		l.stop(err)
+	}
+	return err
 }
 
 // contextTransport sends every request under ctx.
