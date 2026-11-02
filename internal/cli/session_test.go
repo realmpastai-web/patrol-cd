@@ -1,6 +1,8 @@
 package cli_test
 
 import (
+	"encoding/base64"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -251,6 +253,36 @@ func TestSSOLoginAndRefresh(t *testing.T) {
 	// A server without SSO refuses --sso.
 	e2 := clitest.New(t, clitest.Options{})
 	e2.Run("login", e2.Addr, "--plaintext", "--sso", "--sso-port", "0").Failed(t, 20, "is not configured with SSO")
+}
+
+// TestSSOKeySetRefused pins what docs/guides/installation.md says the commands show when an
+// SSO session has expired and go-jose refuses the IdP's key set.
+func TestSSOKeySetRefused(t *testing.T) {
+	t.Parallel()
+	const refused = "go-jose/go-jose: invalid RSA key, modulus too large"
+	refusedKey := map[string]any{
+		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "unused", "e": "AQAB",
+		"n": base64.RawURLEncoding.EncodeToString(new(big.Int).Lsh(big.NewInt(1), 4096).Bytes()), // 4097 bits
+	}
+	idp := clitest.NewFakeIdP(t)
+	e := clitest.New(t, clitest.Options{CM: map[string]string{"oidc.config": idp.OIDCConfig("")}})
+	e.Run("login", e.Addr, "--plaintext", "--sso", "--sso-port", "0").Succeeded(t)
+	later := clitest.RunOptions{Factory: func(f *cmdutil.Factory) { f.Now = func() time.Time { return time.Now().Add(48 * time.Hour) } }}
+
+	idp.SetExtraJWK(refusedKey)
+	e.RunWith(later, "account", "get-user-info").Failed(t, 20, refused, "run 'patrol relogin' to re-authenticate")
+	// That renewal redeemed the refresh token, and this IdP rotates them.
+	e.RunWith(later, "account", "get-user-info").Failed(t, 20, "invalid_grant", "run 'patrol relogin' to re-authenticate")
+	e.Run("relogin", "--sso-port", "0").Failed(t, 20, refused)
+
+	idp.SetExtraJWK(nil)
+	e.RunWith(later, "account", "get-user-info").Failed(t, 20, "invalid_grant")
+	e.Run("relogin", "--sso-port", "0").Succeeded(t)
+	e.Run("account", "get-user-info").Succeeded(t).Contains(t, "Username: jane@example.com")
+
+	idp.SetExtraJWK(refusedKey)
+	r := e.RunWith(later, "account", "session-token").Failed(t, 1, "Refresh token is invalid or expired")
+	r.NotContains(t, refused)
 }
 
 func TestNoSecretsInLogs(t *testing.T) {

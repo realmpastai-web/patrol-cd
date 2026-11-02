@@ -264,12 +264,13 @@ proof that a key set is safe.
 
 | Path | What you see |
 |------|--------------|
-| Web login | The user signs in at the IdP, then gets a 401 `ID token verification failed`; patrol-server logs `SSO login failed` with go-jose's message in `error` |
-| `patrol login --sso` | The command fails with go-jose's message |
-| A `patrol` command whose SSO session has expired | The renewal fails with go-jose's message; `patrol account session-token` prints `Refresh token is invalid or expired` instead. `patrol relogin` fails with go-jose's message until the key set is fixed. Patrol redeems the refresh token before it verifies the ID token, so on an IdP that rotates refresh tokens the next renewal fails with `invalid_grant`, even after the fix, until you run `patrol relogin` |
+| Web login | The user signs in at the IdP, then gets a 401 `ID token verification failed`; patrol-server logs `SSO login failed` with the error in `error` |
+| `patrol login --sso` | The command fails with the error |
+| A `patrol` command whose SSO session has expired | The renewal fails with the error; `patrol account session-token` prints `Refresh token is invalid or expired` instead. `patrol relogin` fails with the error until the key set is fixed. Patrol redeems the refresh token before it verifies the ID token, so on an IdP that rotates refresh tokens the next renewal fails with `invalid_grant`, even after the fix, until you run `patrol relogin` |
 | ID token as a bearer token | Routes that need a login answer 401 `invalid session: invalid token`, and public routes treat the caller as not logged in; no reason is logged |
 
-go-jose's message is one of:
+The error is long: go-oidc's prefix, one of go-jose's messages, then the key set the IdP served,
+which holds only public keys. The go-jose messages are:
 
 - `go-jose/go-jose: invalid RSA key, modulus too large`
 - `go-jose/go-jose: invalid Ed25519 public key, wrong length for x`

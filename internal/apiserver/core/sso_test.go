@@ -1,10 +1,12 @@
 package core_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,24 @@ func ssoEnv(t *testing.T, idp *fakeIdP, extra string) *testEnv {
 	cm := defaultCM()
 	cm["oidc.config"] = idp.oidcConfig(extra)
 	return newEnv(t, envOptions{cm: cm, sso: &core.SSOConfig{}})
+}
+
+// logBuffer holds what the server logs from its request goroutines.
+type logBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func cookieNamed(cs []*http.Cookie, name string) *http.Cookie {
@@ -168,7 +188,8 @@ func TestSSOLoginErrors(t *testing.T) {
 }
 
 // TestSSOKeySetRefused pins the answer to an ID token that fails verification, here because
-// go-jose refuses the key set: a 401 without the reason, where v3.5.5 answers 500.
+// go-jose refuses the key set: a 401 without the reason, which goes to the log, where v3.5.5
+// answers 500.
 func TestSSOKeySetRefused(t *testing.T) {
 	t.Parallel()
 	idp := newFakeIdP(t)
@@ -178,7 +199,10 @@ func TestSSOKeySetRefused(t *testing.T) {
 		"n": base64.RawURLEncoding.EncodeToString(new(big.Int).Lsh(big.NewInt(1), 4096).Bytes()), // 4097 bits
 	}
 	idp.mu.Unlock()
-	e := ssoEnv(t, idp, "")
+	var log logBuffer
+	cm := defaultCM()
+	cm["oidc.config"] = idp.oidcConfig("")
+	e := newEnv(t, envOptions{cm: cm, sso: &core.SSOConfig{}, logger: slog.New(slog.NewJSONHandler(&log, nil))})
 	b := e.browser()
 
 	resp, err := b.Get(e.url + apiclient.PathAuthLogin)
@@ -197,7 +221,8 @@ func TestSSOKeySetRefused(t *testing.T) {
 	assert.Contains(t, body, "ID token verification failed")
 	assert.NotContains(t, body, "go-jose")
 	assert.Nil(t, cookieNamed(resp.Cookies(), auth.SessionCookieName))
-	assert.GreaterOrEqual(t, e.loginCount("sso", "failure"), float64(1))
+	assert.Equal(t, float64(1), e.loginCount("sso", "failure"))
+	assert.Regexp(t, `"msg":"SSO login failed".*go-jose/go-jose: invalid RSA key, modulus too large`, log.String())
 }
 
 func TestOIDCExchange(t *testing.T) {

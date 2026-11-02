@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"maps"
 	"math/big"
 	"net/http"
@@ -160,6 +161,7 @@ type envOptions struct {
 	repo        reposerver.Client
 	version     *core.VersionInfo
 	sso         *core.SSOConfig
+	logger      *slog.Logger
 	// secretLag delays the settings snapshot after secret writes (patrol-secret informer
 	// and settings debounce in production).
 	secretLag time.Duration
@@ -271,6 +273,7 @@ func newEnv(t *testing.T, o envOptions) *testEnv {
 		RepoServer: o.repo,
 		Version:    o.version,
 		Metrics:    m,
+		Logger:     o.logger,
 		Now:        e.clock.Now,
 	})
 	tbl := rest.NewTable()

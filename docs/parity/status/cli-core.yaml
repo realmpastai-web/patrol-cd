@@ -352,6 +352,7 @@ TEN-130:
     - internal/cli/sso/sso_test.go:TestLoginTimeoutAndCancel
     - internal/cli/sso/sso_test.go:TestProviderFromSettings
     - internal/cli/sso/sso_test.go:TestLoginKeySetRefused
+    - internal/cli/session_test.go:TestSSOKeySetRefused
   notes: >-
     Authorization code + PKCE (S256), state and nonce checks, loopback callback, refresh
     grant and exchange through the real server's /session/oidc-exchange; the identity provider

@@ -157,7 +157,7 @@ func TestLoginCallbackErrors(t *testing.T) {
 }
 
 // TestLoginKeySetRefused: the CLI verifies the ID token itself, so a key set go-jose
-// refuses stops a login and a session renewal here, with the message
+// refuses stops a login and a session renewal here, with an error that holds the message
 // docs/guides/installation.md quotes.
 func TestLoginKeySetRefused(t *testing.T) {
 	t.Parallel()
