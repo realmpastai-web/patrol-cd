@@ -10,7 +10,7 @@ and rebuilt from the API server at any time. Behavior was researched in upstream
 `gitops-engine/pkg/cache` and `controller/cache` (Argo CD v3.5.5) and re-implemented; no
 upstream code is imported or copied.
 
-The package does not import `api/v1alpha1` or any other Patrol package.
+The package does not import `api/v1alpha1`. Its one Patrol import is `internal/clusters`, for `RefuseRedirects` in `DiscoverAPIResources`, so `internal/clusters` cannot import this package.
 
 ## Responsibilities
 

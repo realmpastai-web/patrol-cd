@@ -71,11 +71,6 @@ func (rt handlerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error)
 	return rec.Result(), nil
 }
 
-// TestCoreClusterConnectionsUseCallerCredentials: cluster updates and rotate-auth in core
-// mode never authenticate with the credentials stored in the Cluster Secret (patrol's
-// manager service account on the destination cluster). With a kubeconfig context for the
-// server, the connection check and the rotation use the caller's credentials; without one,
-// nothing is sent to the cluster: the update proceeds unchecked and rotate-auth is refused.
 // With no provider, a destination other than the in-cluster one is one core mode has no credentials
 // for, which a preview renders without.
 func TestCoreInClusterOnly(t *testing.T) {
@@ -93,6 +88,11 @@ func TestCoreInClusterOnly(t *testing.T) {
 	require.ErrorAs(t, err, &none)
 }
 
+// TestCoreClusterConnectionsUseCallerCredentials: cluster updates and rotate-auth in core
+// mode never authenticate with the credentials stored in the Cluster Secret (patrol's
+// manager service account on the destination cluster). With a kubeconfig context for the
+// server, the connection check and the rotation use the caller's credentials; without one,
+// nothing is sent to the cluster: the update proceeds unchecked and rotate-auth is refused.
 func TestCoreClusterConnectionsUseCallerCredentials(t *testing.T) {
 	requireEnvtest(t)
 	cfg := krest.CopyConfig(testCfg)

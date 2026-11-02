@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	k8sversion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -450,6 +451,18 @@ func TestDiscoverAPIResourcesRefusesRedirects(t *testing.T) {
 			}
 			assert.Zero(t, followed.Load(), "the redirect was followed")
 		})
+	}
+}
+
+// client-go reaches the transport through its wrappers to cancel a request that timed out, and logs
+// a warning at one it cannot see through.
+func TestDiscoveryWrappersExposeTheirTransport(t *testing.T) {
+	t.Parallel()
+	inner := http.DefaultTransport
+	for _, rt := range []http.RoundTripper{contextTransport{next: inner}, clusters.RefuseRedirects(inner)} {
+		w, ok := rt.(utilnet.RoundTripperWrapper)
+		require.True(t, ok, "%T", rt)
+		assert.Same(t, inner, w.WrappedRoundTripper(), "%T", rt)
 	}
 }
 

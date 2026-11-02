@@ -236,6 +236,9 @@ func (t contextTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.next.RoundTrip(r.WithContext(t.ctx))
 }
 
+// WrappedRoundTripper exposes the inner transport to client-go utilities.
+func (t contextTransport) WrappedRoundTripper() http.RoundTripper { return t.next }
+
 // buildDiscovery derives the cache's API view from discovery documents. For each group the
 // preferred version of every resource is chosen (falling back to the first version serving
 // it), mirroring client-go's ServerPreferredResources.

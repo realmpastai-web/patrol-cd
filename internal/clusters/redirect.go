@@ -26,3 +26,6 @@ func (n noRedirect) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	return resp, nil
 }
+
+// WrappedRoundTripper exposes the inner transport to client-go utilities.
+func (n noRedirect) WrappedRoundTripper() http.RoundTripper { return n.rt }
