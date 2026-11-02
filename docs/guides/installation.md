@@ -254,6 +254,31 @@ Dex listens on plain HTTP inside the cluster (`server.dex.server.plaintext`); it
 admits only patrol-server. Dex uses memory storage (no Kubernetes access): sessions do not
 survive a Dex restart, and it runs one replica.
 
+Patrol refuses the IdP's whole key set (JWKS) if it holds an RSA key above 4096 bits, or an
+Ed25519 key with the wrong length or a low-order point, even when that key did not sign the
+token. go-jose enforces this while parsing the set, and no Patrol setting changes it. Argo CD
+v3.5.5 has an older go-jose and accepts these key sets. Discovery does not read the keys, so the
+failure appears when Patrol has to fetch them. That happens at the first verification after a
+start, and it can happen at any later time, so a running server that still verifies tokens is no
+proof that a key set is safe.
+
+| Path | What you see |
+|------|--------------|
+| Web login | The user signs in at the IdP, then gets a 401 `ID token verification failed`; patrol-server logs `SSO login failed` with the error in `error` |
+| `patrol login --sso` | The command fails with the error |
+| A `patrol` command whose SSO session has expired | The renewal fails with the error; `patrol account session-token` prints `Refresh token is invalid or expired` instead. `patrol relogin` fails with the error until the key set is fixed. Patrol redeems the refresh token before it verifies the ID token, so on an IdP that rotates refresh tokens the next renewal fails with `invalid_grant`, even after the fix, until you run `patrol relogin` |
+| ID token as a bearer token | Routes that need a login answer 401 `invalid session: invalid token`, and public routes treat the caller as not logged in; no reason is logged |
+
+The error is long: go-oidc's prefix, one of go-jose's messages, then the key set the IdP served,
+which holds only public keys. The go-jose messages are:
+
+- `go-jose/go-jose: invalid RSA key, modulus too large`
+- `go-jose/go-jose: invalid Ed25519 public key, wrong length for x`
+- `go-jose/go-jose: invalid Ed25519 public key, low-order point`
+
+The fix is on the IdP side: remove or replace that key. Local accounts are not affected, and
+Patrol sessions already issued stay valid until they expire.
+
 ## Security model and RBAC
 
 | Component | Kubernetes access (release namespace) | Local cluster |
@@ -601,6 +626,9 @@ the same keys).
   components' policies, ingress refusals, other CNIs, HA and the other profiles are unverified.
 - Dex: no configuration launcher (OPS-152); the `patrol` client secret is a manual step; memory
   storage, one replica.
+- SSO: a key set with an RSA key above 4096 bits or a malformed Ed25519 key is refused as a whole
+  ([Single sign-on](#single-sign-on)); Argo CD v3.5.5 accepts it. Tested against a fake IdP only,
+  so whether a real IdP publishes such a key is not known.
 - The controller tree API does not support client certificates (no mTLS for that hop).
 - `selfSigned` internal TLS does not verify certificates (Argo CD's default behavior).
 - `/download/patrol-*` CLI downloads are not populated by the image (see images.md).

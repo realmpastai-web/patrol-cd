@@ -3,12 +3,16 @@ package oidc
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
@@ -312,6 +316,123 @@ func TestIdPKeyRotationAndRediscoveryRateLimit(t *testing.T) {
 	if got := f.hits() - before; got != 1 {
 		t.Fatalf("rediscoveries = %d, want 1", got)
 	}
+}
+
+// rsaJWK is an RSA public key whose modulus has the given length. It signs nothing, so
+// the modulus need not be a product of two primes.
+func rsaJWK(bits int) map[string]any {
+	n := new(big.Int).Lsh(big.NewInt(1), uint(bits-1))
+	return map[string]any{
+		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "unused",
+		"n": base64.RawURLEncoding.EncodeToString(n.SetBit(n, 0, 1).Bytes()),
+		"e": "AQAB",
+	}
+}
+
+func ed25519JWK(x []byte) map[string]any {
+	return map[string]any{
+		"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA", "kid": "unused",
+		"x": base64.RawURLEncoding.EncodeToString(x),
+	}
+}
+
+// TestKeySetLimits pins what go-jose refuses while parsing the IdP's key set: one such
+// key fails every verification that has to fetch the set, although a good key signed the
+// token. The limits are kept on purpose (#273), and these are the messages
+// docs/guides/installation.md quotes.
+func TestKeySetLimits(t *testing.T) {
+	t.Parallel()
+	goodEd25519, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		tooLarge    = "go-jose/go-jose: invalid RSA key, modulus too large"
+		wrongLength = "go-jose/go-jose: invalid Ed25519 public key, wrong length for x"
+		lowOrder    = "go-jose/go-jose: invalid Ed25519 public key, low-order point"
+	)
+	tests := []struct {
+		name    string
+		key     map[string]any
+		wantErr string
+	}{
+		{name: "RSA key of 4096 bits", key: rsaJWK(4096)},
+		{name: "RSA key of 4097 bits", key: rsaJWK(4097), wantErr: tooLarge},
+		{name: "RSA key of 8192 bits", key: rsaJWK(8192), wantErr: tooLarge},
+		{name: "valid Ed25519 key", key: ed25519JWK(goodEd25519)},
+		{name: "Ed25519 key of 31 bytes", key: ed25519JWK(make([]byte, ed25519.PublicKeySize-1)), wantErr: wrongLength},
+		{name: "Ed25519 key of 33 bytes", key: ed25519JWK(make([]byte, ed25519.PublicKeySize+1)), wantErr: wrongLength},
+		{name: "Ed25519 low-order point", key: ed25519JWK(make([]byte, ed25519.PublicKeySize)), wantErr: lowOrder},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeIdP(t)
+			f.set(func(f *fakeIdP) { f.extraJWKs = []map[string]any{tc.key} })
+			p := newTestProvider(t, f, nil)
+			ctx := context.Background()
+			raw := f.signIDToken("u", "", "", nil)
+
+			_, verifyErr := p.VerifyIDToken(ctx, raw)
+			_, externalErr := p.VerifyExternal(ctx, raw)
+			codec := newTestCodec(t, time.Now)
+			// Discovery does not fetch the key set, so a login only fails at the callback.
+			authURL, cookie, err := p.StartLogin(ctx, codec, LoginRequest{RedirectURL: callbackURL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, callbackErr := p.HandleCallback(ctx, f.follow(authURL), cookie, codec)
+
+			for name, err := range map[string]error{"VerifyIDToken": verifyErr, "VerifyExternal": externalErr, "HandleCallback": callbackErr} {
+				if tc.wantErr == "" {
+					if err != nil {
+						t.Errorf("%s: %v", name, err)
+					}
+					continue
+				}
+				if !errors.Is(err, ErrIDTokenInvalid) || !strings.Contains(fmt.Sprint(err), tc.wantErr) {
+					t.Errorf("%s: err = %v, want %q", name, err, tc.wantErr)
+				}
+			}
+			if tc.wantErr != "" && !errors.Is(externalErr, auth.ErrInvalidToken) {
+				t.Errorf("VerifyExternal: err = %v, want auth.ErrInvalidToken", externalErr)
+			}
+		})
+	}
+}
+
+// TestKeySetLimitsCachedKey: a key the provider already holds does not need the set, so a
+// refused key published later only shows when the keys are fetched: by a new process, or
+// after a rotation, whose re-discovery starts with an empty cache and so loses the old key.
+func TestKeySetLimitsCachedKey(t *testing.T) {
+	t.Parallel()
+	const tooLarge = "go-jose/go-jose: invalid RSA key, modulus too large"
+	f := newFakeIdP(t)
+	p := newTestProvider(t, f, nil)
+	ctx := context.Background()
+	raw := f.signIDToken("u", "", "", nil)
+	if _, err := p.VerifyIDToken(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *fakeIdP) { f.extraJWKs = []map[string]any{rsaJWK(4097)} })
+	if _, err := p.VerifyIDToken(ctx, raw); err != nil {
+		t.Fatalf("cached key: %v", err)
+	}
+	refused := func(name string, p *Provider, raw string) {
+		t.Helper()
+		if _, err := p.VerifyIDToken(ctx, raw); !errors.Is(err, ErrIDTokenInvalid) || !strings.Contains(fmt.Sprint(err), tooLarge) {
+			t.Errorf("%s: err = %v, want %q", name, err, tooLarge)
+		}
+	}
+	refused("new process", newTestProvider(t, f, nil), raw)
+
+	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *fakeIdP) { f.key, f.kid = newKey, "key-2" })
+	refused("rotated key", p, f.signIDToken("u", "", "", nil))
+	refused("key cached before the rotation", p, raw)
 }
 
 func TestProviderTLSConfig(t *testing.T) {

@@ -3,7 +3,9 @@ package sso_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -151,6 +153,41 @@ func TestLoginCallbackErrors(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLoginKeySetRefused: the CLI verifies the ID token itself, so a key set go-jose
+// refuses stops a login and a session renewal here, with an error that holds the message
+// docs/guides/installation.md quotes.
+func TestLoginKeySetRefused(t *testing.T) {
+	t.Parallel()
+	idp := clitest.NewFakeIdP(t)
+	opts := sso.LoginOptions{LaunchBrowser: true, OpenBrowser: clitest.Browse, Timeout: 20 * time.Second}
+	res, err := sso.Login(t.Context(), provider(idp), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idp.SetExtraJWK(map[string]any{
+		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "unused", "e": "AQAB",
+		"n": base64.RawURLEncoding.EncodeToString(new(big.Int).Lsh(big.NewInt(1), 4096).Bytes()), // 4097 bits
+	})
+	_, loginErr := sso.Login(t.Context(), provider(idp), opts)
+	_, refreshErr := sso.Refresh(t.Context(), provider(idp), nil, res.RefreshToken)
+	want := "go-jose/go-jose: invalid RSA key, modulus too large"
+	for name, err := range map[string]error{"login": loginErr, "refresh": refreshErr} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", name, err, want)
+		}
+	}
+
+	// The refresh token was redeemed before the ID token was verified, so on an IdP that
+	// rotates them fixing the key set does not bring the session back: only a login does.
+	idp.SetExtraJWK(nil)
+	if _, err := sso.Refresh(t.Context(), provider(idp), nil, res.RefreshToken); err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("refresh after the fix: err = %v, want invalid_grant", err)
+	}
+	if _, err := sso.Login(t.Context(), provider(idp), opts); err != nil {
+		t.Errorf("login after the fix: %v", err)
 	}
 }
 
