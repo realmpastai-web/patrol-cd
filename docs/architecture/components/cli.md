@@ -211,6 +211,7 @@ e.RunAs(e.LoginToken("alice"), "proj", "delete", "demo").Failed(t, 20, "permissi
 | Port-forward via SPDY | WebSocket `v4.channel.k8s.io` | Module graph |
 | `delete-token` by issued-at only | Also `--id` | Addition |
 | Implicit OIDC flow | Refused | Security |
+| `--sso` reads the ID token's claims without verifying it | Login and session renewal verify the signature, issuer and expiry against the IdP's key set, and at login the nonce | Only the CLI holds the nonce, and checking it means nothing on an unverified token |
 | `--port-forward`/`--core` use the current context's credentials | Only a context of that mode | Credential hygiene |
 
 ## Gaps

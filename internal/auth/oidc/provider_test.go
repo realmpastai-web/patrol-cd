@@ -337,8 +337,9 @@ func ed25519JWK(x []byte) map[string]any {
 }
 
 // TestKeySetLimits pins what go-jose refuses while parsing the IdP's key set: one such
-// key fails every verification, although a good key signed the token. The limits are
-// kept on purpose (#273), and these are the messages docs/guides/installation.md quotes.
+// key fails every verification that has to fetch the set, although a good key signed the
+// token. The limits are kept on purpose (#273), and these are the messages
+// docs/guides/installation.md quotes.
 func TestKeySetLimits(t *testing.T) {
 	t.Parallel()
 	goodEd25519, _, err := ed25519.GenerateKey(rand.Reader)
@@ -397,6 +398,26 @@ func TestKeySetLimits(t *testing.T) {
 				t.Errorf("VerifyExternal: err = %v, want auth.ErrInvalidToken", externalErr)
 			}
 		})
+	}
+}
+
+// TestKeySetLimitsCachedKey: a key the provider already holds does not need the set, so
+// a refused key published later only shows when the keys are fetched, as by a new process.
+func TestKeySetLimitsCachedKey(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	p := newTestProvider(t, f, nil)
+	ctx := context.Background()
+	raw := f.signIDToken("u", "", "", nil)
+	if _, err := p.VerifyIDToken(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *fakeIdP) { f.extraJWKs = []map[string]any{rsaJWK(4097)} })
+	if _, err := p.VerifyIDToken(ctx, raw); err != nil {
+		t.Fatalf("cached key: %v", err)
+	}
+	if _, err := newTestProvider(t, f, nil).VerifyIDToken(ctx, raw); !errors.Is(err, ErrIDTokenInvalid) {
+		t.Fatalf("new process: err = %v, want %v", err, ErrIDTokenInvalid)
 	}
 }
 

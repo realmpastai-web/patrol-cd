@@ -332,10 +332,6 @@ TEN-110:
     - internal/cli/session_test.go:TestLoginContextsLogout
     - internal/cli/session_test.go:TestLoginFailures
     - internal/cli/session_test.go:TestLoginTLS
-    - internal/cli/sso/sso_test.go:TestLoginKeySetRefused
-  notes: >-
-    patrol login --sso verifies the ID token itself, so a key set go-jose refuses stops the
-    login; the difference from v3.5.5 is under TEN-128.
 
 TEN-111:
   status: verified
@@ -355,7 +351,11 @@ TEN-130:
     - internal/cli/sso/sso_test.go:TestLoginCallbackErrors
     - internal/cli/sso/sso_test.go:TestLoginTimeoutAndCancel
     - internal/cli/sso/sso_test.go:TestProviderFromSettings
+    - internal/cli/sso/sso_test.go:TestLoginKeySetRefused
   notes: >-
     Authorization code + PKCE (S256), state and nonce checks, loopback callback, refresh
     grant and exchange through the real server's /session/oidc-exchange; the identity provider
-    is a fake (clitest.FakeIdP). The implicit flow is refused.
+    is a fake (clitest.FakeIdP). The implicit flow is refused. Unlike the v3.5.5 CLI, patrol
+    verifies the ID token itself at login and renewal (docs/architecture/components/cli.md), so
+    a key set go-jose refuses stops both before the exchange; the server's difference from
+    v3.5.5 is under TEN-128.

@@ -258,13 +258,15 @@ Patrol refuses the IdP's whole key set (JWKS) if it holds an RSA key above 4096 
 Ed25519 key with the wrong length or a low-order point, even when that key did not sign the
 token. go-jose enforces this while parsing the set, and no Patrol setting changes it. Argo CD
 v3.5.5 has an older go-jose and accepts these key sets. Discovery does not read the keys, so the
-failure appears when Patrol has to fetch them: at the first verification after a start, and
-whenever a token's key is not in its cache.
+failure appears when Patrol has to fetch them. That happens at the first verification after a
+start, and it can happen at any later time, so a running server that still verifies tokens is no
+proof that a key set is safe.
 
 | Path | What you see |
 |------|--------------|
 | Web login | The user signs in at the IdP, then gets a 401 `ID token verification failed`; patrol-server logs `SSO login failed` with go-jose's message in `error` |
 | `patrol login --sso` | The command fails with go-jose's message |
+| A `patrol` command whose SSO session has expired | The renewal fails with go-jose's message; `patrol relogin` fails the same way until the key set is fixed |
 | ID token as a bearer token | A 401 `invalid session: invalid token`; no reason is logged |
 
 go-jose's message is one of:
@@ -273,8 +275,8 @@ go-jose's message is one of:
 - `go-jose/go-jose: invalid Ed25519 public key, wrong length for x`
 - `go-jose/go-jose: invalid Ed25519 public key, low-order point`
 
-The fix is on the IdP side: remove or replace that key. Local accounts and Patrol sessions
-already issued are not affected.
+The fix is on the IdP side: remove or replace that key. Local accounts are not affected, and
+Patrol sessions already issued stay valid until they expire.
 
 ## Security model and RBAC
 

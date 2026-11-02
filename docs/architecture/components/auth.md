@@ -184,7 +184,7 @@ and etcd's default 1.5 MiB request limit.
 | Malformed or old-format entries in the revocation Secret | ignored with a warning (count only), dropped on the next write |
 | IdP down at startup | no I/O until first use; discovery retried with backoff, failures cached for 5 s, a working provider is kept if a re-discovery fails |
 | IdP key rotation | go-oidc refetches JWKS on unknown keys; a signature failure additionally triggers one re-discovery per minute |
-| IdP key set holds an RSA key above 4096 bits or a malformed Ed25519 key | go-jose refuses the whole set, so every verification that has to fetch it fails, even for a token a good key signed (`TestKeySetLimits`, `TestLoginKeySetRefused`); local accounts and issued Patrol sessions are unaffected |
+| IdP key set holds an RSA key above 4096 bits or a malformed Ed25519 key | go-jose refuses the whole set, so every verification that has to fetch it fails, even for a token a good key signed (`TestKeySetLimits`, `TestLoginKeySetRefused`); a key already cached keeps verifying (`TestKeySetLimitsCachedKey`); local accounts are unaffected and issued Patrol sessions stay valid until they expire |
 | Userinfo groups enabled but no cached entry for a bearer ID token | rejected (`ErrUserInfoUnavailable`), as upstream |
 | Login cache flooded with fake usernames | random non-admin entry evicted; admin's count preserved |
 
