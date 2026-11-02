@@ -5,7 +5,9 @@
  *
  * - requests no MSW handler matches (the request still fails, as with onUnhandledRequest: 'error');
  * - unhandled promise rejections and uncaught exceptions;
- * - console.error output, except the intentional error-boundary output in ALLOWED_CONSOLE_ERRORS;
+ * - console.error output, also from scripts jsdom runs, except the intentional error-boundary
+ *   output in ALLOWED_CONSOLE_ERRORS;
+ * - errors jsdom reports, among them what it does not implement (navigation, window.open);
  * - elements left in document.body after cleanup(): UI mounted outside render()/renderApp()
  *   keeps running after its test (queries, watch streams, timers);
  * - real network requests (see blockRealNetwork).
@@ -131,11 +133,26 @@ const onUncaughtException = (error: unknown) => record('uncaught exception', des
 
 let originalConsoleError: typeof console.error | undefined;
 
-function guardedConsoleError(...args: unknown[]): void {
-  originalConsoleError?.(...args);
+function checkConsoleError(...args: unknown[]): void {
   const text = format(...args);
   if (text.startsWith(MSW_UNHANDLED_REQUEST) || isAllowedConsoleError(text)) return;
   record('console.error', firstLines(text));
+}
+
+function guardedConsoleError(...args: unknown[]): void {
+  originalConsoleError?.(...args);
+  checkConsoleError(...args);
+}
+
+const onJsdomError = (error: Error) => record('jsdom error', firstLines(error.stack ?? error.message));
+
+/**
+ * The environment's jsdom instance reports here: 'jsdomError' for its own errors, 'error' for
+ * console.error in the scripts it runs. vitest creates it before it replaces console, so both go
+ * to the console underneath and guardedConsoleError does not see them.
+ */
+function jsdomConsole(): NodeJS.EventEmitter | undefined {
+  return (globalThis as { jsdom?: { virtualConsole: NodeJS.EventEmitter } }).jsdom?.virtualConsole;
 }
 
 /** beforeAll: starts watching the process and the console. */
@@ -145,12 +162,16 @@ export function startGuards(): void {
   process.on('uncaughtException', onUncaughtException);
   originalConsoleError = console.error;
   console.error = guardedConsoleError;
+  jsdomConsole()?.on('jsdomError', onJsdomError);
+  jsdomConsole()?.on('error', checkConsoleError);
 }
 
 /** afterAll: stops watching and fails the file for findings made while no test ran. */
 export function stopGuards(): void {
   process.off('unhandledRejection', onUnhandledRejection);
   process.off('uncaughtException', onUncaughtException);
+  jsdomConsole()?.off('jsdomError', onJsdomError);
+  jsdomConsole()?.off('error', checkConsoleError);
   if (console.error === guardedConsoleError && originalConsoleError) console.error = originalConsoleError;
   originalConsoleError = undefined;
   const findings = fileFindings.splice(0);
@@ -173,6 +194,11 @@ export function checkDocumentAfterCleanup(): void {
     `${names} still in document.body. UI mounted outside render()/renderApp() keeps running after the test (queries, streams, timers); unmount and remove it before the test ends.`,
   );
   document.body.replaceChildren();
+}
+
+/** For the guards' own tests: what the running test has recorded, which then does not fail it. */
+export function takeTestFindings(): Finding[] {
+  return testFindings.splice(0);
 }
 
 /** afterEach, last: fails the test that just ran when anything was recorded. */
