@@ -240,10 +240,12 @@ OPS-132:
 OPS-133:
   status: implemented
   impl: [internal/cli/admin/cluster.go]
-  tests: [internal/cli/admin/cluster_test.go:TestClusterStatsAndShards]
+  tests:
+    - internal/cli/admin/cluster_test.go:TestClusterStatsAndShards
+    - test/integration/clusterinfo_test.go:TestClusterInfoWrittenByController
   notes: >-
-    Statistics are read from Cluster.status (ADR-0004, no Redis cache); the test seeds that status
-    instead of a running controller writing it.
+    Statistics are read from Cluster.status (ADR-0004, no Redis cache); the unit test seeds that
+    status, and the integration test reads what a running controller wrote.
 
 OPS-134:
   status: implemented

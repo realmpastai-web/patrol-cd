@@ -55,8 +55,11 @@ cluster's server URL (the in-cluster address uses the current context). The cred
 stored for Patrol CD in Cluster Secrets are never used. Without such a context, `cluster
 add` / `cluster set` save the change without a connection check, `cluster rotate-auth`
 fails with `core mode changes a cluster only with your own kubeconfig credentials for it,
-never with the credentials stored for Patrol CD: ...`, and logs, events and live resources
-of that cluster fail with `core mode: no kubeconfig context for destination cluster <url>`.
+never with the credentials stored for Patrol CD: ...`, logs, events and live resources
+of that cluster fail with `core mode: no kubeconfig context for destination cluster <url>`,
+and a render of it (`app manifests --revision`, `app diff --revision`) uses the Kubernetes
+version and API versions its status holds. With such a context, a status that lacks them is
+completed from the cluster.
 
 `--plaintext`, `--insecure`, `--server-crt`, client certificates and
 `--grpc-web-root-path` have no effect in core mode (no network connection to a server).

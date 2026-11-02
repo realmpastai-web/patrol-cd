@@ -47,6 +47,11 @@ type clusterTarget struct {
 // error stays out of the response: it can name credential Secrets and connection details.
 type userMessager interface{ UserMessage() string }
 
+// noCredentials is implemented by errors of a ClusterConfigs provider that holds no credentials for
+// a cluster by design (core mode with no kubeconfig context for it). Nothing was sent to the cluster,
+// and a call that can do without the cluster goes on.
+type noCredentials interface{ NoCredentials() }
+
 // clusterConfigUnavailable is the 503 for a destination cluster whose configuration cannot be
 // built. The cause is attached for the server log; it reaches the client only when it opts in
 // with UserMessage.
@@ -65,7 +70,8 @@ func clusterConfigUnavailable(server string, cause error) *apirest.Error {
 // proj matching the cluster URL and destination namespace is impersonated (user name only);
 // with no match the request fails when application.sync.impersonation.enforced, otherwise
 // the cluster's credentials are used (info log). Without impersonate (web terminal,
-// SYNC-123), the cluster's credentials are always used.
+// SYNC-123, and a preview's question about the destination's versions), the cluster's
+// credentials are always used.
 func (s *Service) appClusterConfig(ctx context.Context, app *v1alpha1.Application, proj *v1alpha1.AppProject, st *settings.Settings, impersonate bool) (*clusterTarget, error) {
 	cc, err := s.clusterConfigs()
 	if err != nil {

@@ -18,7 +18,7 @@ All versions are pinned exactly in `ui/package.json`; `ui/pnpm-lock.yaml` is com
 | Build | Vite 7, `@vitejs/plugin-react`, TypeScript 5.9 (`strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`) |
 | UI | React 19, react-router 7 (data router, lazy route modules), @tanstack/react-query 5 |
 | Styling | CSS modules + CSS custom properties (no CSS framework), inline SVG icons |
-| Tests | vitest 4 + jsdom, @testing-library/react + user-event + jest-dom, MSW 2 |
+| Tests | vitest 5 + jsdom, @testing-library/react + user-event + jest-dom, MSW 2 |
 | Browser tests | Playwright (`ui/e2e`, `ui/playwright.config.ts`), not part of `pnpm test` |
 | Lint | ESLint 10 flat config: typescript-eslint (type-checked), jsx-a11y (strict), react-hooks |
 | API types | openapi-typescript 7 over `api/openapi/openapi.json` (`pnpm gen:api`) |

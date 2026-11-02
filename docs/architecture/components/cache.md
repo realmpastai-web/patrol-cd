@@ -10,7 +10,7 @@ and rebuilt from the API server at any time. Behavior was researched in upstream
 `gitops-engine/pkg/cache` and `controller/cache` (Argo CD v3.5.5) and re-implemented; no
 upstream code is imported or copied.
 
-The package does not import `api/v1alpha1` or any other Patrol package.
+The package does not import `api/v1alpha1`. Its one Patrol import is `internal/clusters`, for `RefuseRedirects` in `DiscoverAPIResources`, so `internal/clusters` cannot import this package.
 
 ## Responsibilities
 
@@ -52,6 +52,7 @@ reading settings (`internal/settings`), shard assignment (`internal/controller`)
 | `ResourceKey` | `{Group, Kind, Namespace, Name}`. `String()` gives `group/kind/namespace/name`, `ParseResourceKey`, `GroupKind()`, `KeyOf(un)`, `NewResourceKey`. |
 | `ClusterInfo` | `Server`, `K8SVersion`, `APIsCount`, `ResourcesCount`, `LastCacheSyncTime`, `SyncError`, `Synced`, `ActiveWatches`, `UnavailableAPIs []UnavailableAPI{GroupKind, Version, Namespace, Reason, Message}` (reasons: `ListForbidden`, `WatchForbidden`, `DiscoveryFailed`). |
 | `APIResourceInfo` | `GroupKind`, `GroupVersionResource`, `Meta metav1.APIResource`. |
+| `DiscoverAPIResources(ctx, *rest.Config)` | The server version and API resources a cache of the cluster would report, and the group versions whose discovery failed, for a caller with no cache (`GET .../manifests`). The discovery client takes no context, so `ctx` reaches its requests through the transport and their rate limit through the limiter, and `discoveryTimeout` bounds them together; client-go's wait for a `Retry-After` is above the transport, so only the request timeout bounds that. A configuration with no limits gets those of the cache. A limiter wait that cannot end in time stops the call, and an answer `ctx` cut short is an error. A redirect is refused, as on a connection check (`clusters.RefuseRedirects`). The connections of a transport the configuration holds are closed with the call. |
 | `GVKParser` | `Type(gvk) *typed.ParseableType` (nil when unknown or ambiguous) and `Ambiguous()`. |
 | `Manager` | `NewManager(ManagerOptions{Logger, OnCacheCreated, CacheOptions})`, `Get(ctx, clusterKey, cfg, settings) (ClusterCache, error)` (creates if absent, then `EnsureSynced`), `Lookup(clusterKey) (ClusterCache, bool)` (the existing cache, without creating or syncing one), `Invalidate(clusterKey)` (closes and forgets), `ClustersInfo()`, `Close()`. |
 | Predicates | `TopLevelResource`, `ResourceOfGroupKind(group, kind)`. |

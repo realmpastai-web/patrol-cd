@@ -308,6 +308,7 @@ type testEnv struct {
 	audit       *auditLog
 	recorder    *record.FakeRecorder
 	repo        *fakeRepoServer
+	repos       *repository.Resolver
 	live        *fakeLive
 	broadcaster *applications.Broadcaster
 	url         string
@@ -387,7 +388,7 @@ func newEnv(t *testing.T, o envOptions) *testEnv {
 	lister, err := repository.NewLister(dyn, kc, repository.ListerOptions{Namespace: e.ns})
 	require.NoError(t, err)
 	require.NoError(t, lister.Start(ctx))
-	resolver, err := repository.NewResolver(lister, repository.Options{})
+	e.repos, err = repository.NewResolver(lister, repository.Options{})
 	require.NoError(t, err)
 
 	conf := applications.Config{Namespace: e.ns, RefreshTimeout: 10 * time.Second, RefreshPollInterval: 100 * time.Millisecond}
@@ -402,7 +403,7 @@ func newEnv(t *testing.T, o envOptions) *testEnv {
 		require.NoError(t, err)
 	}
 	deps := applications.Deps{
-		Config: conf, Client: handlerClient, Reader: reader, Settings: e.holder, Events: events, Repositories: resolver,
+		Config: conf, Client: handlerClient, Reader: reader, Settings: e.holder, Events: events, Repositories: e.repos,
 		RepoServer: e.repo, LiveResources: e.live,
 	}
 	if o.noLive {

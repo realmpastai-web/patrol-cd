@@ -125,11 +125,13 @@ func (s *Service) validateSources(ctx context.Context, app *v1alpha1.Application
 		return nil, err
 	}
 	sources := app.Spec.GetSources()
-	runtime := true
-	if app.Spec.SourceHydrator != nil {
+	in := renderInput{app: app, proj: proj, st: st, hasMultiple: app.Spec.HasMultipleSources()}
+	switch {
+	case app.Spec.SourceHydrator != nil:
 		// The sync branch may not exist yet: check the dry source, without cluster data.
 		sources = v1alpha1.ApplicationSources{app.Spec.SourceHydrator.GetDrySource()}
-		runtime = false
+	case cluster != nil:
+		in.kubeVersion, in.apiVersions = cluster.Status.ServerVersion, cluster.Status.Info.APIVersions
 	}
 	// Only sources the project permits are rendered; the others are reported by the
 	// permission check (repository credentials must not be used for them).
@@ -138,8 +140,7 @@ func (s *Service) validateSources(ctx context.Context, app *v1alpha1.Application
 			return nil, nil
 		}
 	}
-	refs, err := s.refSources(ctx, sources, proj.Name, nil)
-	if err != nil {
+	if in.refs, err = s.refSources(ctx, sources, proj.Name, nil); err != nil {
 		return nil, err
 	}
 	var issues []project.Issue
@@ -147,7 +148,7 @@ func (s *Service) validateSources(ctx context.Context, app *v1alpha1.Application
 		if src.Ref != "" && src.Path == "" && src.Chart == "" {
 			continue // ref-only source: nothing to render
 		}
-		req, err := s.manifestRequest(ctx, renderInput{app: app, proj: proj, st: st, cluster: cluster, runtime: runtime, refs: refs, hasMultiple: app.Spec.HasMultipleSources()}, src, src.TargetRevision)
+		req, err := s.manifestRequest(ctx, in, src, src.TargetRevision)
 		if err != nil {
 			var re *rest.Error
 			if errors.As(err, &re) && re.Status == 400 {

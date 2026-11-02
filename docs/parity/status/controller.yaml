@@ -649,8 +649,8 @@ REPO-094:
   notes: >-
     Not complete: the implicit in-cluster cluster, the destination of a default install, has no
     object and so no Application count, API versions or cache information; GET /clusters shows the
-    probe only, and GET manifests renders without its API versions (#246). Registering a Cluster
-    object for that server is the workaround. For the clusters that have an object it is exercised
+    probe only (#246), while GET manifests asks the cluster itself. Registering a Cluster object for
+    that server is the workaround. For the clusters that have an object it is exercised
     through the API and the CLI, not the UI. Written to Cluster.status instead of Redis (ADR-0004):
     an unchanged status is not written, a change of the cache statistics alone is written at most
     once a minute, and connectionState.attemptedAt moves when the connection status or message
@@ -661,7 +661,8 @@ REPO-094:
     upstream's Redis entry lapses after 10 minutes: with every controller stopped the last state
     stays. A skip-reconcile cluster reports Unknown, and so does a cache from its invalidation to
     the next sync. Validation and GET manifests read serverVersion and apiVersions from the status
-    where upstream asks the destination, so unlike upstream's entry they stay until a destination
+    where upstream asks the destination, GET manifests asking it only if the status lacks one, so
+    unlike upstream's entry they stay until a destination
     answers again: a stale value after a destination upgrade, with no cache to report it, instead
     of Helm's default version. spec.server is immutable on the CRD, so a value that stays is always
     this destination's. As upstream, a destination that fails under a synced cache shows as Failed only

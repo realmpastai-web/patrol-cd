@@ -78,7 +78,8 @@ destination server <s> and namespace <ns>` when enforced (default), else the clu
 credentials (info log). Impersonated: resource events, live get/patch/delete, action discovery
 and execution (including the Application self path's resolution), pod logs, resource links.
 Not impersonated: Application events, trees/managed resources/server-side diff (controller),
-the web terminal (SYNC-123). Destination Kubernetes errors keep their status and message with
+the web terminal (SYNC-123), a preview's question about the destination's versions, which the
+controller's cache asks with the cluster credentials (`api-applications.md`). Destination Kubernetes errors keep their status and message with
 the upstream prefix (`error getting resource: …`, `error patching resource: …`, `error deleting
 resource: …`, `error listing resource events: …`); 401s and transport errors are 503 with
 generic details.
