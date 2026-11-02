@@ -290,6 +290,122 @@ func TestSettingsChangesApplyToRBAC(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, apiErr(t, err).StatusCode)
 }
 
+// sessionCookie returns the session cookie set on a response, or nil.
+func sessionCookie(rec *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestSessionCookieAttributes: login, renewal, logout and both ways of clearing a bad cookie give
+// the session cookie the same attributes. Behind a TLS-terminating proxy the server sees plain
+// HTTP, and only an https url tells it that browsers use TLS. TestSSOCookieAttributes in
+// internal/apiserver/core covers the SSO answers.
+func TestSessionCookieAttributes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		insecure   bool
+		url        string
+		additional string
+		host       string
+		tls        bool
+		secure     bool
+	}{
+		{name: "TLS terminated by a proxy", insecure: true, url: "https://patrol.example.com", secure: true},
+		{name: "url scheme in upper case", insecure: true, url: "HTTPS://patrol.example.com", secure: true},
+		{name: "plain HTTP", insecure: true, url: "http://patrol.example.com"},
+		{name: "plain HTTP with no url", insecure: true},
+		{name: "request over TLS", insecure: true, url: "http://patrol.example.com", tls: true, secure: true},
+		{name: "server with TLS", url: "http://patrol.example.com", secure: true},
+		{name: "https additional url for the request host", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.example.com", secure: true},
+		{name: "plain HTTP beside an https additional url", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.internal"},
+		{name: "plain HTTP additional url for the request host", insecure: true, url: "http://patrol.internal", additional: "- http://patrol.example.com\n", host: "patrol.example.com"},
+		{name: "https url with a plain HTTP additional url", insecure: true, url: "https://patrol.example.com", additional: "- http://patrol.internal\n", host: "patrol.internal", secure: true},
+		{name: "https additional url for the host of an http url", insecure: true, url: "http://patrol.example.com", additional: "- https://patrol.example.com\n", host: "patrol.example.com", secure: true},
+		{name: "https additional url after an http one for the same host", insecure: true, url: "http://patrol.internal", additional: "- http://patrol.example.com\n- https://patrol.example.com\n", host: "patrol.example.com", secure: true},
+		{name: "additional url with a default port", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com:443\n", host: "patrol.example.com", secure: true},
+		{name: "request host with a default port", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.example.com:443", secure: true},
+		{name: "additional url on a port the proxy drops", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com:8443\n", host: "patrol.example.com", secure: true},
+		{name: "additional url in upper case", insecure: true, url: "http://patrol.internal", additional: "- HTTPS://Patrol.Example.com\n", host: "patrol.example.com", secure: true},
+		{name: "request host with a trailing dot", insecure: true, url: "http://patrol.internal", additional: "- https://patrol.example.com\n", host: "patrol.example.com.", secure: true},
+		{name: "https additional url after one that does not parse", insecure: true, url: "http://patrol.internal", additional: "- \"https://[bad\"\n- https://patrol.example.com\n", host: "patrol.example.com", secure: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t, apiserver.Config{Insecure: tc.insecure, RootPath: "patrol"})
+			f.cm["url"] = tc.url
+			if tc.additional != "" {
+				f.cm["additionalUrls"] = tc.additional
+			}
+			f.settings.set(f.cm, map[string]string{}, f.secret)
+			acct, err := f.settings.Current().Accounts().Get("admin")
+			require.NoError(t, err)
+			session, err := f.tokens.IssueLoginSession(context.Background(), acct, 0)
+			require.NoError(t, err)
+			expiring, err := f.tokens.IssueLoginSession(context.Background(), acct, time.Minute)
+			require.NoError(t, err)
+
+			steps := []struct {
+				name, method, path, body, cookie string
+				status                           int
+				clears                           bool
+			}{
+				{name: "login", method: http.MethodPost, path: apiclient.PathSession + "?cookie=true", body: `{"username":"admin","password":"Password1!"}`, status: http.StatusOK},
+				{name: "renewal", method: http.MethodGet, path: apiclient.PathSessionUserInfo, cookie: expiring.Token, status: http.StatusOK},
+				{name: "cookie that is not a token", method: http.MethodGet, path: apiclient.PathSessionUserInfo, cookie: "not-a-token", status: http.StatusOK, clears: true},
+				{name: "token that does not verify", method: http.MethodGet, path: apiclient.PathSessionUserInfo, cookie: "aaa.bbb.ccc", status: http.StatusOK, clears: true},
+				{name: "logout", method: http.MethodDelete, path: apiclient.PathSession, cookie: session.Token, status: http.StatusOK, clears: true},
+			}
+			for _, step := range steps {
+				req := httptest.NewRequest(step.method, "/patrol"+step.path, strings.NewReader(step.body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set(rest.CSRFHeader, rest.CSRFHeaderValue)
+				if step.cookie != "" {
+					req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: step.cookie})
+				}
+				if tc.host != "" {
+					req.Host = tc.host
+				}
+				if tc.tls {
+					req.TLS = &tls.ConnectionState{}
+				}
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+
+				require.Equal(t, step.status, rec.Code, step.name)
+				got := sessionCookie(rec)
+				require.NotNil(t, got, step.name)
+				assert.Equal(t, tc.secure, got.Secure, step.name)
+				assert.Equal(t, "/patrol", got.Path, step.name)
+				assert.Equal(t, step.clears, got.Value == "", step.name)
+			}
+		})
+	}
+}
+
+// TestSessionCookieWithoutSettings: before the first settings snapshot a bad cookie is still
+// cleared with the attributes the server knows from its own configuration.
+func TestSessionCookieWithoutSettings(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, apiserver.Config{RootPath: "patrol"})
+	f.settings.cur.Store(nil)
+	req := httptest.NewRequest(http.MethodGet, "/patrol"+apiclient.PathSessionUserInfo, nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "not-a-token"})
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+
+	got := sessionCookie(rec)
+	require.NotNil(t, got)
+	assert.Empty(t, got.Value)
+	assert.True(t, got.Secure)
+	assert.Equal(t, "/patrol", got.Path)
+}
+
 func TestNewValidation(t *testing.T) {
 	t.Parallel()
 	_, err := apiserver.New(apiserver.Config{}, apiserver.Deps{})

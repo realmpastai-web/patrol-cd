@@ -161,6 +161,7 @@ type envOptions struct {
 	repo        reposerver.Client
 	version     *core.VersionInfo
 	sso         *core.SSOConfig
+	baseHRef    string
 	logger      *slog.Logger
 	// secretLag delays the settings snapshot after secret writes (patrol-secret informer
 	// and settings debounce in production).
@@ -264,7 +265,7 @@ func newEnv(t *testing.T, o envOptions) *testEnv {
 	m, err := rest.NewMetrics(e.registry)
 	require.NoError(t, err)
 	h := core.New(core.Deps{
-		Config:     core.Config{Namespace: testNamespace, DisableAuth: o.disableAuth, AppsInAnyNamespaceEnabled: true},
+		Config:     core.Config{Namespace: testNamespace, BaseHRef: o.baseHRef, DisableAuth: o.disableAuth, AppsInAnyNamespaceEnabled: true},
 		Settings:   e.holder,
 		Tokens:     e.tokens,
 		Login:      e.login,
@@ -290,7 +291,6 @@ func newEnv(t *testing.T, o envOptions) *testEnv {
 				}
 				return rest.AuthPolicy{AnonymousEnabled: st.AnonymousUserEnabled(), Scopes: sc}
 			},
-			Cookie:      auth.CookieOptions{Path: "/"},
 			DisableAuth: o.disableAuth,
 		},
 		Enforcer:    e.enforcer,

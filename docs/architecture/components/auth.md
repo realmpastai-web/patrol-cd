@@ -194,9 +194,13 @@ and etcd's default 1.5 MiB request limit.
   and `slog.LogValuer` with the key ID only; the raw ID token in `oidc.Result` must not
   be logged by callers; usernames of unknown accounts are not logged (they are often
   mistyped passwords).
-- Cookies: session cookie `patrol.token` is `HttpOnly`, `SameSite=Strict`, `Secure`
-  (configurable for plain-HTTP dev), path = root path; the state cookie is `SameSite=Lax`
-  because it must survive the cross-site redirect from the IdP.
+- Cookies: session cookie `patrol.token` is `HttpOnly`, `SameSite=Strict`, path = root path.
+  It is `Secure` when the server runs without `--insecure`, the request came over TLS, the
+  `url` setting is https, or `additionalUrls` has an https entry for the request's host name,
+  whatever its port. A server behind a TLS-terminating proxy therefore needs an https `url`.
+  `core.Config.CookieOptions` decides this for login, renewal and clearing. The state cookie uses
+  the same `Secure` decision and is `SameSite=Lax` because it must survive the cross-site redirect
+  from the IdP.
 - `ValidateRedirectURL` rejects user info, opaque URLs, backslashes, whitespace,
   control characters (including encoded CR/LF in the path), scheme-relative and relative
   URLs, and paths that escape the base path after cleaning.
@@ -252,6 +256,7 @@ derivation only).
 | Invalid `admin.enabled` ignored (admin stays enabled); invalid `accounts.x.enabled` fails parsing for all accounts | the affected account is disabled, others unaffected | fail closed without locking everyone out |
 | `ARGOCD_SESSION_MAX_CACHE_SIZE` code default 10000 | 1000 (upstream documented value) | task specification |
 | Cookie chunks `argocd.token-N`, `SameSite=Lax` | `patrol.token.N`, `SameSite=Strict` | ADR-0009 |
+| Login and renewal cookies are `Secure` unless `--insecure`; SSO cookies follow the scheme of `url` | one rule for all of them: also `Secure` when the request came over TLS, `url` is https, or `additionalUrls` has an https entry for the request's host name | a server behind a TLS-terminating proxy must not drop `Secure` from the session cookie (#22) |
 | Redirect path check is a raw prefix (`/argo` allows `/argocd-x`) | segment-boundary check, host compared case-insensitively | open-redirect hardening |
 | Logout URL placeholders substituted literally | values are query-escaped | correct for the documented query usage |
 | Dex secret `base64url(sha256(key))[:40]`, clients `argo-cd`/`argo-cd-cli` | `base64url(HMAC-SHA256(key, label))[:40]`, clients `patrol`/`patrol-cli` | domain separation; both sides use Patrol's helper |

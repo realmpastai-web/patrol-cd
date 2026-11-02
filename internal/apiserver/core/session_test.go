@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/juliosaraiva/patrol-cd/internal/apiserver/core"
 	"github.com/juliosaraiva/patrol-cd/internal/apiserver/rest"
 	"github.com/juliosaraiva/patrol-cd/internal/auth"
 	"github.com/juliosaraiva/patrol-cd/pkg/apiclient"
@@ -293,4 +294,15 @@ func TestNoRenewalOnSessionEndingRoutes(t *testing.T) {
 	assert.True(t, old == carol.Token(), "the client keeps its (now invalid) token")
 	_, err = e.tokens.Verify(ctx, old)
 	require.ErrorIs(t, err, auth.ErrSessionInvalidated)
+}
+
+// TestCookieOptionsWithoutRequest: rest.HTTPRequest returns nil outside an HTTP handler, and then
+// there is no host for an additionalUrls entry to match.
+func TestCookieOptionsWithoutRequest(t *testing.T) {
+	t.Parallel()
+	cm := defaultCM()
+	cm["additionalUrls"] = "- https://patrol.example.com\n"
+	e := newEnv(t, envOptions{cm: cm})
+	got := core.Config{BaseHRef: "/patrol/"}.CookieOptions(nil, e.holder.Current())
+	assert.Equal(t, auth.CookieOptions{Path: "/patrol/"}, got)
 }

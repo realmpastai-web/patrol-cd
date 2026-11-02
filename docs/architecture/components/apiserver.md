@@ -226,8 +226,8 @@ stale.
   unknown usernames of failed logins are not logged (often mistyped passwords).
 - Problem details of 5xx are generic; Kubernetes Forbidden messages (which describe the
   server's service account) are not returned.
-- Cookies: `patrol.token` HttpOnly, SameSite=Strict, Secure unless `--insecure`; state
-  cookie SameSite=Lax, short-lived, encrypted.
+- Cookies: `patrol.token` HttpOnly, SameSite=Strict, Secure by the rule in
+  [auth.md](auth.md#security-notes); state cookie SameSite=Lax, short-lived, encrypted.
 - RBAC is checked before existence for account reads; SSE re-checks credentials and
   authorizes every event.
 - The Dex proxy never forwards Patrol credentials (`patrol.token` cookies, Patrol-issued
