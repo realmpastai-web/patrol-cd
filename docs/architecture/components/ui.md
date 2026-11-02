@@ -325,13 +325,14 @@ it on mount.
 - No snapshot tests. Each design-system component has keyboard and ARIA assertions.
 - Guards (`src/test/guards.ts`, installed by `setup.ts`) fail the test that made a problem,
   naming it: unmocked requests, unhandled rejections and uncaught exceptions, `console.error`
-  output (except the error-boundary output allow-listed per file and test in
-  `ALLOWED_CONSOLE_ERRORS`; tests that expect an error spy with
+  output, also from scripts jsdom runs (except the error-boundary output allow-listed per file
+  and test in `ALLOWED_CONSOLE_ERRORS`; tests that expect an error spy with
   `vi.spyOn(console, 'error').mockImplementation(...)`), errors jsdom reports, among them what
   it does not implement (`src/test/guards.test.ts` pins these across vitest majors), and
-  elements left in `document.body` after `cleanup()`: UI mounted outside `render`/`renderApp` keeps its queries, streams and
-  timers running after the test. The fetch underneath MSW refuses every request, so work that
-  outlives its file cannot reach a real service on jsdom's origin `http://localhost:3000`
+  elements left in `document.body` after `cleanup()`: UI mounted outside `render`/`renderApp`
+  keeps its queries, streams and timers running after the test. The fetch underneath MSW refuses
+  every request, so work that outlives its file cannot reach a real service on jsdom's origin
+  `http://localhost:3000`
   ([2026-10-16 flake](../../verification/runs/2026-10-16-ui-flake.md)).
 - Playwright specs in `ui/e2e` target `PATROL_UI_URL` and are not run by `pnpm test`.
 
