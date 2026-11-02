@@ -186,6 +186,8 @@ DIFF-087:
   impl: [internal/compare/info.go, internal/controller/app/liveevents.go]
   tests:
     - internal/compare/info_test.go:TestAppOfAndSkipResourceUpdate
+    - internal/compare/info_test.go:TestAppOfOwnerGraphs
+    - internal/compare/info_test.go:TestAppOfLayeredOwners
     - internal/compare/info_test.go:TestPopulateResourceInfoAttribution
     - internal/controller/app/liveevents_test.go:TestOnResourceUpdated
   notes: >-
