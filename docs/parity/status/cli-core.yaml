@@ -332,6 +332,10 @@ TEN-110:
     - internal/cli/session_test.go:TestLoginContextsLogout
     - internal/cli/session_test.go:TestLoginFailures
     - internal/cli/session_test.go:TestLoginTLS
+    - internal/cli/sso/sso_test.go:TestLoginKeySetRefused
+  notes: >-
+    patrol login --sso verifies the ID token itself, so a key set go-jose refuses stops the
+    login; the difference from v3.5.5 is under TEN-128.
 
 TEN-111:
   status: verified

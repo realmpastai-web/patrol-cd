@@ -254,6 +254,28 @@ Dex listens on plain HTTP inside the cluster (`server.dex.server.plaintext`); it
 admits only patrol-server. Dex uses memory storage (no Kubernetes access): sessions do not
 survive a Dex restart, and it runs one replica.
 
+Patrol refuses the IdP's whole key set (JWKS) if it holds an RSA key above 4096 bits, or an
+Ed25519 key with the wrong length or a low-order point, even when that key did not sign the
+token. go-jose enforces this while parsing the set, and no Patrol setting changes it. Argo CD
+v3.5.5 has an older go-jose and accepts these key sets. Discovery does not read the keys, so the
+failure appears when Patrol has to fetch them: at the first verification after a start, and
+whenever a token's key is not in its cache.
+
+| Path | What you see |
+|------|--------------|
+| Web login | The user signs in at the IdP, then gets a 401 `ID token verification failed`; patrol-server logs `SSO login failed` with go-jose's message in `error` |
+| `patrol login --sso` | The command fails with go-jose's message |
+| ID token as a bearer token | A 401 `invalid session: invalid token`; no reason is logged |
+
+go-jose's message is one of:
+
+- `go-jose/go-jose: invalid RSA key, modulus too large`
+- `go-jose/go-jose: invalid Ed25519 public key, wrong length for x`
+- `go-jose/go-jose: invalid Ed25519 public key, low-order point`
+
+The fix is on the IdP side: remove or replace that key. Local accounts and Patrol sessions
+already issued are not affected.
+
 ## Security model and RBAC
 
 | Component | Kubernetes access (release namespace) | Local cluster |
@@ -601,6 +623,9 @@ the same keys).
   components' policies, ingress refusals, other CNIs, HA and the other profiles are unverified.
 - Dex: no configuration launcher (OPS-152); the `patrol` client secret is a manual step; memory
   storage, one replica.
+- SSO: a key set with an RSA key above 4096 bits or a malformed Ed25519 key is refused as a whole
+  ([Single sign-on](#single-sign-on)); Argo CD v3.5.5 accepts it. Tested against a fake IdP only,
+  so whether a real IdP publishes such a key is not known.
 - The controller tree API does not support client certificates (no mTLS for that hop).
 - `selfSigned` internal TLS does not verify certificates (Argo CD's default behavior).
 - `/download/patrol-*` CLI downloads are not populated by the image (see images.md).

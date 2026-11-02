@@ -351,9 +351,11 @@ TEN-127:
   tests:
     - internal/apiserver/core/sso_test.go:TestSSOLoginFlow
     - internal/apiserver/core/sso_test.go:TestSSOLoginErrors
+    - internal/auth/oidc/provider_test.go:TestKeySetLimits
   notes: >-
     Authorization-code flow with state, nonce and optional PKCE; the browser gets a Patrol SSO
-    session cookie (ADR-0009). Implicit flow and ARGOCD_SSO_DEBUG are not supported.
+    session cookie (ADR-0009). Implicit flow and ARGOCD_SSO_DEBUG are not supported. A key set
+    go-jose refuses fails the login; the difference from v3.5.5 is under TEN-128.
 
 TEN-128:
   status: in-progress
@@ -361,9 +363,13 @@ TEN-128:
   tests:
     - internal/apiserver/core/sso_test.go:TestIdPTokenAsBearer
     - internal/apiserver/core/sso_test.go:TestOIDCExchange
+    - internal/auth/oidc/provider_test.go:TestKeySetLimits
   notes: >-
-    IdP ID tokens are accepted as bearer tokens through SSO.ExternalVerifier (wired by the
-    server command, which does not exist yet) and exchanged by the CLI endpoint.
+    IdP ID tokens are accepted as bearer tokens through SSO.ExternalVerifier (wired in
+    internal/server/server_api.go) and exchanged by the CLI endpoint. Differs from v3.5.5 by
+    decision (#273): go-jose 4.1.6 refuses the whole key set for an RSA key above 4096 bits or a
+    malformed Ed25519 key, which v3.5.5's go-jose 4.1.4 accepts (V-0069, a fake IdP only;
+    docs/guides/installation.md, Single sign-on).
 
 TEN-129:
   status: implemented

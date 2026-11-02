@@ -43,6 +43,7 @@ type fakeIdP struct {
 	userinfoStatus    int
 	discoveryFailures int
 	hugeDiscovery     bool
+	extraJWKs         []map[string]any // served beside the signing key
 	// observations
 	discoveryHits int
 	tokenRequests []url.Values
@@ -137,13 +138,14 @@ func (f *fakeIdP) discovery(w http.ResponseWriter, _ *http.Request) {
 
 func (f *fakeIdP) jwks(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
-	pub, kid := f.key.PublicKey, f.kid
+	pub, kid, extra := f.key.PublicKey, f.kid, f.extraJWKs
 	f.mu.Unlock()
-	writeJSON(w, map[string]any{"keys": []map[string]any{{
+	keys := []map[string]any{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid,
 		"n": base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
 		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
-	}}})
+	}}
+	writeJSON(w, map[string]any{"keys": append(keys, extra...)})
 }
 
 func (f *fakeIdP) authorize(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,7 @@ type FakeIdP struct {
 	refresh  map[string]bool
 	refreshN int
 	authN    int
+	extraJWK map[string]any
 }
 
 type idpCode struct{ clientID, redirectURI, nonce, challenge string }
@@ -63,11 +64,17 @@ func NewFakeIdP(t testing.TB) *FakeIdP {
 		})
 	})
 	mux.HandleFunc("GET /keys", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"keys": []map[string]any{{
+		keys := []map[string]any{{
 			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "k1",
 			"n": base64.RawURLEncoding.EncodeToString(f.key.N.Bytes()),
 			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(f.key.E)).Bytes()),
-		}}})
+		}}
+		f.mu.Lock()
+		if f.extraJWK != nil {
+			keys = append(keys, f.extraJWK)
+		}
+		f.mu.Unlock()
+		writeJSON(w, map[string]any{"keys": keys})
 	})
 	mux.HandleFunc("GET /auth", f.authorize)
 	mux.HandleFunc("POST /token", f.token)
@@ -92,6 +99,13 @@ func (f *FakeIdP) SetClaim(k string, v any) {
 		return
 	}
 	f.claims[k] = v
+}
+
+// SetExtraJWK serves key in the key set beside the signing key.
+func (f *FakeIdP) SetExtraJWK(key map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.extraJWK = key
 }
 
 // Authorizations and Refreshes count the authorization requests and refresh grants.

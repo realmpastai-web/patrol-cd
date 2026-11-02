@@ -184,6 +184,7 @@ and etcd's default 1.5 MiB request limit.
 | Malformed or old-format entries in the revocation Secret | ignored with a warning (count only), dropped on the next write |
 | IdP down at startup | no I/O until first use; discovery retried with backoff, failures cached for 5 s, a working provider is kept if a re-discovery fails |
 | IdP key rotation | go-oidc refetches JWKS on unknown keys; a signature failure additionally triggers one re-discovery per minute |
+| IdP key set holds an RSA key above 4096 bits or a malformed Ed25519 key | go-jose refuses the whole set, so every verification that has to fetch it fails, even for a token a good key signed (`TestKeySetLimits`, `TestLoginKeySetRefused`); local accounts and issued Patrol sessions are unaffected |
 | Userinfo groups enabled but no cached entry for a bearer ID token | rejected (`ErrUserInfoUnavailable`), as upstream |
 | Login cache flooded with fake usernames | random non-admin entry evicted; admin's count preserved |
 
@@ -259,6 +260,7 @@ derivation only).
 | Revocation checks `uti` but logout revokes `at_hash` for Entra tokens | one `jti` -> `uti` -> `at_hash` order for both | revocation actually effective |
 | Userinfo only with `userInfoPath` | falls back to the discovered `userinfo_endpoint` | convenience |
 | Revoked token IDs stored unbounded in Redis (`revoked-token\|<jti>`) | bounded Secret with hashed fixed-length keys and per-principal collapse | ADR-0004 (no Redis); one principal cannot exhaust the store |
+| go-jose 4.1.4 accepts RSA keys above 4096 bits and malformed Ed25519 keys in the IdP's key set | go-jose 4.1.6 refuses the whole set for such a key | decided in #273: `jose.MaxRSAModulusBits` applies to the whole process and leaves the Ed25519 check in place, which has no setting |
 
 ## Known gaps
 
