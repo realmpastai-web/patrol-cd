@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -26,10 +25,6 @@ import (
 // Azure forms of the k8s-auth helper) for a server URL chosen by the caller. The connection
 // is checked by the application controller instead.
 var ErrExecNotAllowed = errors.New("exec credential plugins and cloud identity tokens are not used by the API server")
-
-// ErrRedirect is returned when a cluster answers a request with a redirect: credentials
-// are never replayed to another location.
-var ErrRedirect = errors.New("the cluster answered with a redirect, which is not followed")
 
 // DefaultProbeTimeout bounds a connection check.
 const DefaultProbeTimeout = 15 * time.Second
@@ -88,7 +83,7 @@ func (c *connector) config(ctx context.Context, cl *v1alpha1.Cluster, data map[s
 		d := &net.Dialer{Timeout: c.o.Timeout, KeepAlive: 30 * time.Second, Control: guardControl}
 		cfg.Dial = d.DialContext
 	}
-	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper { return noRedirect{rt} })
+	cfg.Wrap(clusterlib.RefuseRedirects)
 	cfg.Timeout = c.o.Timeout
 	return cfg, nil
 }
@@ -109,22 +104,6 @@ func (c *connector) Kubernetes(ctx context.Context, cl *v1alpha1.Cluster, data m
 		return nil, err
 	}
 	return kubernetes.NewForConfig(cfg)
-}
-
-// noRedirect turns redirect responses into errors so that the HTTP client never replays
-// the cluster credentials to the redirect target.
-type noRedirect struct{ rt http.RoundTripper }
-
-func (n noRedirect) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := n.rt.RoundTrip(r)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.Header.Get("Location") != "" {
-		_ = resp.Body.Close()
-		return nil, ErrRedirect
-	}
-	return resp, nil
 }
 
 // metadataAddrs are cloud instance metadata endpoints outside the link-local ranges.

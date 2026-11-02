@@ -253,7 +253,8 @@ therefore has one writer; the synthetic in-cluster cluster has no object and get
 - **Skip-reconcile:** no shard processes such a cluster, so it reports `Unknown` whatever an old
   cache says.
 - **Version and API versions:** validation, `GET .../manifests` and the CLI's local render read them
-  from the status, where upstream asks the destination. So a status with nothing newer keeps them:
+  from the status, where upstream asks the destination (`GET .../manifests` asks it only if the status
+  lacks one). So a status with nothing newer keeps them:
   a cluster with no Applications, a skip-reconcile cluster, the rounds after a controller restart
   and a cache that has not reported report `Unknown` or `Failed` with the last version and list
   known. Only a destination's answer replaces them, and `spec.server` cannot change, so what stays
@@ -363,8 +364,8 @@ different-by-design.
   but the `/cleanup` stage only sees hooks in the live-state cache, so they are left behind.
 - **Implicit in-cluster cluster:** no object, so the updater skips it. A default install shows no
   Application count, API versions or cache information for its main destination, the CLI reads 0
-  there, the UI "Not reported", and `GET manifests` renders without its API versions. Upstream
-  walks the local cluster too. Registering a Cluster object for that server is the workaround
+  there, and the UI "Not reported". `GET manifests` asks the cluster itself. Upstream walks the
+  local cluster too. Registering a Cluster object for that server is the workaround
   (#246).
 - **Cluster information does not expire.** Upstream's Redis entry lapses after 10 minutes. Here
   the status stays at its last value when every controller stops, and `attemptedAt` cannot tell a

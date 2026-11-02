@@ -176,7 +176,7 @@ query or fragment; literal link-local, unspecified, multicast and cloud metadata
 (`metadata.google.internal`, …) are refused unless `Config.AllowLinkLocal`. The default
 `Connector` dials through a `net.Dialer` whose `Control` hook refuses the same addresses after
 DNS resolution, and turns redirect responses into errors so credentials are never replayed to
-another location (`ErrRedirect`). Loopback and private addresses are allowed (clusters live
+another location (`clusters.ErrRedirect`). Loopback and private addresses are allowed (clusters live
 there).
 
 ## Differences from upstream

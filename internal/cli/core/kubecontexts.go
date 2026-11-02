@@ -37,12 +37,12 @@ func resolveNamespace(cc clientcmd.ClientConfig, o clientcmd.ConfigOverrides) st
 	return DefaultNamespace
 }
 
-// destinationConfigs gives the resource routes (logs, events, live resources, actions)
-// the caller's own credentials for each destination cluster: the in-cluster address and
-// the selected context's cluster use the selected context; another cluster uses the first
-// kubeconfig context (by name) whose cluster has the same server URL. Clusters without such
-// a context are refused: the in-process server never uses the credentials stored for
-// patrol-server in Cluster Secrets.
+// destinationConfigs gives the resource routes (logs, events, live resources, actions) and the
+// previews of a cluster whose status lacks its versions the caller's own credentials for each
+// destination cluster: the in-cluster address and the selected context's cluster use the selected
+// context; another cluster uses the first kubeconfig context (by name) whose cluster has the same
+// server URL. Clusters without such a context are refused: the in-process server never uses the
+// credentials stored for patrol-server in Cluster Secrets.
 type destinationConfigs struct {
 	current       *rest.Config
 	currentServer string
@@ -100,3 +100,7 @@ func (e *noContextError) Error() string {
 
 // UserMessage is the text for the caller.
 func (e *noContextError) UserMessage() string { return e.Error() }
+
+// NoCredentials marks the error for the in-process API server (applications.noCredentials): a
+// preview that wanted the cluster's versions renders with what its status holds.
+func (e *noContextError) NoCredentials() {}

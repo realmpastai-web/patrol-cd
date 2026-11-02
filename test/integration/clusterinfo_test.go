@@ -2,7 +2,9 @@ package integration
 
 import (
 	"fmt"
+	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -10,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
+	"github.com/juliosaraiva/patrol-cd/internal/cli/admin"
 	"github.com/juliosaraiva/patrol-cd/internal/clusters"
 	"github.com/juliosaraiva/patrol-cd/internal/server"
 	"github.com/juliosaraiva/patrol-cd/pkg/apiclient"
@@ -99,20 +103,40 @@ func TestClusterInfoWrittenByController(t *testing.T) {
 	assert.Contains(t, row(used), c.Status.ServerVersion)
 	assert.Contains(t, row(used), string(v1alpha1.ConnectionStatusSuccessful))
 	assert.Contains(t, row(idle), string(v1alpha1.ConnectionStatusUnknown))
+
+	// patrol admin reads the same status directly from the control cluster.
+	var stats strings.Builder
+	admincmd := admin.NewCommand(&admin.Factory{
+		IOStreams:  admin.IOStreams{Out: &stats, ErrOut: io.Discard},
+		RESTConfig: func() (*rest.Config, string, error) { return s.Control().Config, s.Namespace, nil },
+	})
+	admincmd.SetArgs([]string{"cluster", "stats", "--replicas", "1"})
+	require.NoError(t, admincmd.ExecuteContext(t.Context()))
+	var fields []string
+	for line := range strings.Lines(stats.String()) {
+		if strings.HasPrefix(line, used.Server+" ") {
+			fields = strings.Fields(line)
+		}
+	}
+	require.Len(t, fields, 6, "SERVER SHARD CONNECTION NAMESPACES APPS RESOURCES:\n%s", stats.String())
+	assert.Equal(t, string(v1alpha1.ConnectionStatusSuccessful), fields[2])
+	assert.Equal(t, "2", fields[4])
+	resources, err := strconv.Atoi(fields[5])
+	require.NoError(t, err)
+	assert.Positive(t, resources)
 }
 
-// TestManifestsMatchControllerCapabilities: GET .../manifests renders with the API versions of the
-// Cluster status, so a chart gated on an API of the destination gives what the controller applied.
-func TestManifestsMatchControllerCapabilities(t *testing.T) {
-	s := stack.Start(t, stack.Options{DedicatedDestinations: 1, Controller: fastClusterInfo})
-	d := s.Destination(2)
-	ns := s.NewNamespace(t, d, "capabilities")
+// gatedChart defines an API of group on d and commits a chart whose ConfigMap "gated" renders only for
+// a destination that serves it. It returns the API, as a chart names it, with the repository and the
+// revision.
+func gatedChart(t *testing.T, s *stack.Stack, d *stack.Cluster, group string) (string, *stack.Repo, string) {
+	t.Helper()
 	d.Apply(t, "", `apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: widgets.patrol-test.example.com
+  name: widgets.`+group+`
 spec:
-  group: patrol-test.example.com
+  group: `+group+`
   scope: Namespaced
   names: {kind: Widget, plural: widgets, singular: widget}
   versions:
@@ -124,7 +148,7 @@ spec:
           type: object
           x-kubernetes-preserve-unknown-fields: true
 `)
-	const widgets = "patrol-test.example.com/v1/Widget"
+	widgets := group + "/v1/Widget"
 	repo := s.Git().NewRepo(t, "capabilities")
 	rev := repo.CommitFiles(t, "v1", map[string]string{
 		"chart/Chart.yaml": "apiVersion: v2\nname: capabilities\nversion: 0.1.0\n",
@@ -137,6 +161,16 @@ metadata:
 `,
 		"chart/templates/always.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: always\n",
 	})
+	return widgets, repo, rev
+}
+
+// TestManifestsMatchControllerCapabilities: GET .../manifests renders with the API versions of the
+// Cluster status, so a chart gated on an API of the destination gives what the controller applied.
+func TestManifestsMatchControllerCapabilities(t *testing.T) {
+	s := stack.Start(t, stack.Options{DedicatedDestinations: 1, Controller: fastClusterInfo})
+	d := s.Destination(2)
+	ns := s.NewNamespace(t, d, "capabilities")
+	widgets, repo, rev := gatedChart(t, s, d, "patrol-test.example.com")
 	s.CreateApp(t, s.NewApp("capabilities", repo, "chart", d, ns))
 	requireSucceeded(t, syncAndWait(t, s, &apiclient.ApplicationSyncRequest{Name: "capabilities"}))
 	s.WaitSyncedHealthy(t, "capabilities", rev)
@@ -154,6 +188,25 @@ metadata:
 		joined := strings.Join(got.Manifests, "\n")
 		return strings.Contains(joined, `"gated"`), joined
 	})
+}
+
+// TestManifestsOfTheInClusterCluster: the in-cluster cluster has no Cluster object to hold a status, so
+// GET .../manifests asks the cluster itself and a gated chart still gives what the controller applied.
+func TestManifestsOfTheInClusterCluster(t *testing.T) {
+	s := stack.Start(t, stack.Options{})
+	d := s.Destination(0)
+	ns := s.NewNamespace(t, d, "capabilities")
+	group := "patrol-test-" + s.ID + ".example.com"
+	_, repo, rev := gatedChart(t, s, d, group)
+	defer d.Delete(t, "apiextensions.k8s.io/v1", "CustomResourceDefinition", "", "widgets."+group)
+	s.CreateApp(t, s.NewApp("capabilities", repo, "chart", d, ns))
+	requireSucceeded(t, syncAndWait(t, s, &apiclient.ApplicationSyncRequest{Name: "capabilities"}))
+	s.WaitSyncedHealthy(t, "capabilities", rev)
+	require.True(t, d.Exists(t, "v1", "ConfigMap", ns, "gated"), "the controller rendered with the destination's APIs")
+
+	got, err := s.API(t).GetApplicationManifests(t.Context(), &apiclient.ApplicationManifestQuery{Name: "capabilities"})
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(got.Manifests, "\n"), `"gated"`)
 }
 
 // TestRenderInputsOutliveTheCache: validation and GET .../manifests read the version and API versions

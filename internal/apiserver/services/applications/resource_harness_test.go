@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -380,11 +381,15 @@ func (f *fakeCluster) updateLog(key string, update func(*fakePodLog)) {
 // clusterConfigs returns the fake cluster's configuration for every destination.
 type clusterConfigs struct {
 	host  string
+	err   error // what RESTConfig fails with, when set
 	calls atomic.Int64
 }
 
 func (c *clusterConfigs) RESTConfig(_ context.Context, cl *v1alpha1.Cluster) (*k8srest.Config, error) {
 	c.calls.Add(1)
+	if c.err != nil {
+		return nil, c.err
+	}
 	if cl == nil || cl.Spec.Server == "" {
 		return nil, fmt.Errorf("no cluster")
 	}
@@ -395,6 +400,9 @@ type resEnvOptions struct {
 	cm        map[string]string
 	resources func(*applications.ResourceDeps)
 	now       func() time.Time // the service's clock (Deps.Now); nil: time.Now
+	// reader wraps what the service reads through (Deps.Reader); nil: the Kubernetes client.
+	reader func(client.Reader) client.Reader
+	logger *slog.Logger // the service's logger; nil: none
 }
 
 // resEnv is an API server with the resource routes: envtest is both the control plane and
@@ -442,8 +450,14 @@ func newResEnv(t *testing.T, o resEnvOptions) *resEnv {
 	}
 	deps := applications.Deps{
 		Config: applications.Config{Namespace: e.ns, RefreshTimeout: 10 * time.Second, RefreshPollInterval: 100 * time.Millisecond},
-		Client: e.kube, Settings: e.holder, Events: e.broadcaster, RepoServer: e.repo, Resources: rd,
+		Client: e.kube, Settings: e.holder, Events: e.broadcaster, Repositories: e.repos, RepoServer: e.repo, Resources: rd,
 		Now: o.now,
+	}
+	if o.reader != nil {
+		deps.Reader = o.reader(e.kube)
+	}
+	if o.logger != nil {
+		deps.Logger = o.logger
 	}
 	svc := applications.New(deps)
 	tbl := rest.NewTable()

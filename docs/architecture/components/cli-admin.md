@@ -145,7 +145,8 @@ procedure for the tracking method in use.
 - The port-forward tunnel has only been exercised against a protocol-faithful fake server
   (no kubelet in envtest; `admin dashboard` was not run against the kind clusters of
   2026-10-19); the dashboard proxy, TLS pinning and pod lookup are tested.
-- `cluster stats/shards` read statistics the controller writes to `Cluster.status`; the tests
-  seed that status.
+- `cluster stats/shards` read statistics the controller writes to `Cluster.status`. `cluster stats`
+  is exercised on the integration stack (`TestClusterInfoWrittenByController`); the tests of
+  `cluster shards` seed that status.
 - `initial-password` reads the Secret; creating it at first start belongs to patrol-server
   (OPS-031).

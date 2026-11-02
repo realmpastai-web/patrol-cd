@@ -15,6 +15,7 @@ import (
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
 	"github.com/juliosaraiva/patrol-cd/internal/apiserver/rest"
+	clusterlib "github.com/juliosaraiva/patrol-cd/internal/clusters"
 	"github.com/juliosaraiva/patrol-cd/pkg/apiclient"
 )
 
@@ -151,7 +152,7 @@ func TestProbeNoRedirectAndGuard(t *testing.T) {
 	c := &v1alpha1.Cluster{Spec: v1alpha1.ClusterSpec{Server: redirector.URL, Name: "r"}}
 	_, err := conn.Probe(context.Background(), c, map[string][]byte{v1alpha1.ClusterSecretKeyBearerToken: []byte("secret-token")})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrRedirect), "%v", err)
+	assert.True(t, errors.Is(err, clusterlib.ErrRedirect), "%v", err)
 	assert.Zero(t, leaked.Load(), "credentials replayed to the redirect target")
 
 	meta := &v1alpha1.Cluster{Spec: v1alpha1.ClusterSpec{Server: "http://169.254.169.254:80", Name: "m"}}
