@@ -5,8 +5,9 @@
 //
 // The version lives in deploy/helm/patrol-cd/Chart.yaml (version = appVersion) and in the git
 // tag vX.Y.Z. A version is "pending" when Chart.yaml names it, CHANGELOG.md has its section and
-// the tag does not exist yet: the release pull request was merged and the release workflow has
-// not tagged it. Nothing new is proposed while a release is pending.
+// the tag does not exist yet: normally the release pull request was merged and the release
+// workflow has not tagged it (select decides which commit, if any, is that merge). Nothing new is
+// proposed while a release is pending.
 //
 // Usage:
 //
@@ -14,7 +15,7 @@
 //	go run ./hack/release preview  [-version X.Y.Z]   # the next CHANGELOG.md section
 //	go run ./hack/release prepare  [-version X.Y.Z]   # write CHANGELOG.md and Chart.yaml
 //	go run ./hack/release status   [-github-output]   # current=, tagged=, changelog=, pending=
-//	go run ./hack/release select   [-github-output]   # status + sha= (release commit), ci=, release=
+//	go run ./hack/release select   [-github-output]   # status + sha= (release commit), pull=, ci=, release=
 //	go run ./hack/release notes    -version X.Y.Z     # release notes from CHANGELOG.md
 //	go run ./hack/release lint     REV-RANGE          # fail on non-conventional commit subjects
 //	go run ./hack/release stage    -version X.Y.Z -registry HOST[/NS] -out DIR
@@ -130,8 +131,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 		st := sel.status
-		kv := fmt.Sprintf("current=%s\ntag=%s\ntagged=%t\nchangelog=%t\npending=%t\nsha=%s\nci=%s\nci_reason=%s\nrelease=%t\n",
-			st.current, st.current.Tag(), st.tagged, st.changelog, st.pending(), sel.sha, sel.ci,
+		kv := fmt.Sprintf("current=%s\ntag=%s\ntagged=%t\nchangelog=%t\npending=%t\nsha=%s\npull=%d\nci=%s\nci_reason=%s\nrelease=%t\n",
+			st.current, st.current.Tag(), st.tagged, st.changelog, st.pending(), sel.sha, sel.pull, sel.ci,
 			strings.ReplaceAll(sel.ciReason, "\n", " "), sel.release())
 		_, _ = fmt.Fprint(stdout, kv)
 		if *ghOutput {
@@ -188,7 +189,7 @@ type releaseStatus struct {
 	changelog bool    // CHANGELOG.md has CURRENT's section
 }
 
-// pending: the release pull request was merged, the release is not tagged yet.
+// pending: CHANGELOG.md has the section of the chart's version and it is not tagged yet.
 func (s releaseStatus) pending() bool { return !s.tagged && s.changelog }
 
 func (r *repo) status(ctx context.Context) (releaseStatus, error) {
@@ -221,7 +222,8 @@ func (r *repo) plan(ctx context.Context, explicit string) (*releaseInfo, error) 
 	}
 	// While a release is pending nothing new is proposed, except the pending version itself
 	// asked for explicitly: that rebuilds its section after its release commit failed CI for a
-	// real defect and the fix was merged (docs/guides/releasing.md).
+	// real defect and the fix was merged, or when no commit is its release commit
+	// (docs/guides/releasing.md).
 	if st.pending() && explicit != st.current.String() {
 		return nil, nil
 	}

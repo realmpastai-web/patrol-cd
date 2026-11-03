@@ -51,6 +51,7 @@ Resume rule: the open `priority/p0` and `priority/p1` issues, then the tracking 
   the kind job (2026-10-21) and merged the release automation (#8, 2026-10-22).
 - **The repository is public** by the user's decision of 2026-10-23 (it lets CodeQL run on it under the CodeQL
   license). **Publishing releases** (images, charts, GitHub releases) happens only through the release flow of
-  `docs/guides/releasing.md`, where merging a release pull request is the user's decision; the repository
-  settings that flow needs are the user's to change (#95).
+  `docs/guides/releasing.md`, where merging a release pull request and approving its publishing jobs in the
+  environment `release` are the user's decisions; the repository settings that flow needs are the user's to
+  change (#95, #218).
 - Disposable environments and the interruption policy are in `CLAUDE.md`.

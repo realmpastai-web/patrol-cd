@@ -3,12 +3,16 @@
 # Runs after every successful CI run on a push to main (and on demand). When a release is pending
 # (Chart.yaml names version X, CHANGELOG.md has X's section and the tag vX does not exist, which is
 # the state right after the release pull request of release-pr.yml is merged) it publishes the
-# release commit: the newest commit on main's first-parent history that changed CHANGELOG.md (the
-# merge of the release pull request). Both events choose it the same way (`hack/release select`),
-# whatever commit the CI run tested or the manual run started from, and publish only once a CI run
-# of the push of that very commit passed every job of the full tier. A later commit is never
-# tagged (its changes would be in the tag but in no changelog section), and a run that skipped
-# jobs (a documentation-only push runs the static checks only) never counts:
+# release commit: the merge of this repository's release/next pull request "chore(release): vX",
+# the newest such commit since the last tag that changed CHANGELOG.md and has the section main has.
+# Any other commit that changed CHANGELOG.md (a pull request from a fork or another branch, a direct
+# push) is passed over. Both events choose the commit the same way (`hack/release select`), whatever
+# commit the CI run tested or the manual run started from, and publish only once a CI run of the
+# push of that very commit passed every job of the full tier. A later commit is never tagged (its
+# changes would be in the tag but in no changelog section), and a run that skipped jobs (a
+# documentation-only push runs the static checks only) never counts. The image and publish jobs
+# then wait for the owner's approval in the environment `release`, once each; plan blocks the
+# release while that environment does not exist or has no required reviewer:
 #
 #   1. artifacts  the patrol CLI for Linux, macOS and Windows (amd64, arm64), the install manifests
 #                 (install.yaml, namespace-install.yaml, core-install.yaml, ha-*.yaml, crds.yaml,
@@ -20,8 +24,9 @@
 #                 the notes from CHANGELOG.md and the artifacts
 #
 # The tag is created last, so it exists only when everything was published; a failed run can be
-# re-run (pushing the same image tag and chart version again replaces them). Otherwise the run does
-# nothing. REGISTRY is the repository variable RELEASE_REGISTRY, default ghcr.io/<owner>.
+# re-run (pushing the same image tag and chart version again replaces them; a re-run job waits for
+# approval again). Otherwise the run does nothing. REGISTRY is the repository variable
+# RELEASE_REGISTRY, default ghcr.io/<owner>.
 name: Release
 
 on:
@@ -33,9 +38,13 @@ on:
 
 permissions: {}
 
-# Releases run one at a time and are never cancelled half way.
+# Releases run one at a time and are never cancelled half way, also while a job waits for approval.
+# Only the events the plan job acts on share the group: GitHub keeps one pending run per group, and
+# an ignored event (a CI run of a pull request, a fork or another branch, a failed CI run, a manual
+# run on another branch) would replace a pending release run. The condition is the plan job's if:,
+# and hack/release's TestReleaseWorkflowsMatch keeps the two the same.
 concurrency:
-  group: release
+  group: ${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) && 'release' || format('release-ignored-{0}', github.run_id) }}
   cancel-in-progress: false
 
 defaults:
@@ -50,7 +59,7 @@ jobs:
   plan:
     name: Is a release pending?
     # Only CI runs of pushes to main of this repository (never pull requests or forks), or a manual
-    # run on main.
+    # run on main. The concurrency group above repeats this condition.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -61,7 +70,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read # the CI runs and jobs of the release commit
+      actions: read # the CI runs and jobs of the release commit, and the environment release
+      pull-requests: read # the pull requests of the commits that changed CHANGELOG.md
     outputs:
       release: ${{ steps.select.outputs.release }}
       version: ${{ steps.select.outputs.current }}
@@ -79,7 +89,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Choose the release commit and check its CI
+      - name: Choose the release commit and check its pull request and CI
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,14 +113,17 @@ jobs:
           REASON: ${{ steps.select.outputs.ci_reason }}
           TAG: ${{ steps.select.outputs.tag }}
           SHA: ${{ steps.select.outputs.sha }}
+          PULL: ${{ steps.select.outputs.pull }}
         run: |
           if [[ $RELEASE == true ]]; then
-            echo "::notice title=release::releasing $TAG from ${SHA:0:7}: $REASON"
+            # The commit and pull request to check before approving the image and publish jobs.
+            echo "::notice title=release::releasing $TAG from $SHA (pull request #$PULL): $REASON"
           elif [[ $PENDING != true ]]; then
             echo "::notice title=release::no release pending ($TAG is tagged, or CHANGELOG.md has no section for it)"
           elif [[ $CI == failed ]]; then
-            # Blocked until CI passes on the release commit: re-run its CI run, or merge the fix
-            # and re-prepare the same version (docs/guides/releasing.md).
+            # Blocked until CI passes on the release commit (re-run its CI run, or merge the fix
+            # and re-prepare the same version), or no commit is the release commit (re-prepare the
+            # same version): docs/guides/releasing.md.
             echo "::error title=release::$TAG is blocked: $REASON"
             exit 1
           elif [[ $EVENT == workflow_dispatch ]]; then
@@ -149,12 +162,16 @@ jobs:
           name: release
           path: dist/release/
           if-no-files-found: error
-          retention-days: 7
+          # publish downloads them after two approvals, which may each take days (a job waits up
+          # to 30).
+          retention-days: 35
 
   image:
     name: Push the image
     needs: plan
     if: needs.plan.outputs.release == 'true'
+    # Waits for the owner's approval (docs/guides/releasing.md), as publish does.
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -200,6 +217,7 @@ jobs:
   publish:
     name: Publish the chart, tag and GitHub release
     needs: [plan, artifacts, image]
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
