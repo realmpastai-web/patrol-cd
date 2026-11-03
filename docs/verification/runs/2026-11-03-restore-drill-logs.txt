@@ -1,0 +1,537 @@
+Verbatim logs of the restore drill runs of 2026-11-03 (record: 2026-11-03-restore-drill.md).
+They hold check results, object names and kinds; no Secret value, password or token.
+
+== §1 make kind-restore-drill (run 1, before the cleanup fix; exit 2 from make, 58 passed, 1 failed)
+hack/kind/restore-drill.sh 
+== preconditions (patrol-control/patrol)
+PASS  pre      Patrol pods Running and ready
+PASS  pre      fixture Applications registered
+PASS  pre      e2e-guestbook is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-guestbook-ssh is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-helm-git is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-kustomize-staging is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-multi-source is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-chart is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-manifests is Synced/Healthy (run make kind-verify first)
+PASS  pre      the 7 e2e Deployments on patrol-target are available
+PASS  pre      admin login with the password in patrol-initial-admin-secret
+PASS  pre      the installed image patrol-cd/patrol-cd:dev is in the local Docker (its patrol CLI runs the drill)
+PASS  pre      e2e-* Namespaces and Deployments recorded on patrol-target (39 objects)
+== backup
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  backup   e2e-guestbook carries resources-finalizer.cd.patrol.example
+PASS  backup   patrol admin export -n patrol
+PASS  backup   no warning from the export
+        1 kind: AppProject
+        7 kind: Application
+        1 kind: Cluster
+        6 kind: ConfigMap
+        5 kind: Repository
+        2 kind: RepositoryCredential
+        6 kind: Secret
+PASS  backup   the backup holds application.cd.patrol.example/e2e-guestbook
+PASS  backup   the backup holds cluster.cd.patrol.example/patrol-target
+PASS  backup   the backup holds secret/patrol-secret
+PASS  backup   the backup holds secret/cluster-patrol-target
+PASS  backup   the backup holds secret/e2e-git-http-creds
+PASS  backup   the backup holds secret/e2e-git-ssh-creds
+PASS  backup   the backup holds secret/e2e-chart-repo-creds
+PASS  backup   the backup holds configmap/patrol-cm
+PASS  backup   the backup holds configmap/patrol-ssh-known-hosts-cm
+PASS  backup   the backup leaves out secret/patrol-initial-admin-secret
+PASS  backup   the backup leaves out secret/patrol-internal-token
+PASS  backup   installed chart: patrol-cd-0.1.0
+== loss: namespace patrol
+PASS  loss     the application and ApplicationSet controllers are stopped
+PASS  loss     no Patrol CD object in patrol has finalizers
+PASS  loss     no Operation is in progress
+PASS  loss     namespace patrol deleted
+PASS  loss     the Patrol CD CRDs remain
+PASS  loss     the e2e-* objects on patrol-target are unchanged
+== reinstall (patrol-cd-0.1.0, saved values)
+PASS  install  helm install patrol with the saved values
+PASS  install  the same chart version is installed
+PASS  install  the new installation created the default AppProject
+PASS  install  the new installation generated another admin password
+== import
+PASS  import   patrol admin import -n patrol
+        import process started patrol
+        /ConfigMap patrol-ssh-known-hosts-cm in namespace patrol updated
+        cd.patrol.example/Repository e2e-git-public-guestbook in namespace patrol created
+        cd.patrol.example/Repository e2e-helm in namespace patrol created
+        cd.patrol.example/Repository e2e-helm-private in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-manifests in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-http in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-ssh in namespace patrol created
+        cd.patrol.example/Cluster patrol-target in namespace patrol created
+        /Secret cluster-patrol-target in namespace patrol created
+        /Secret e2e-chart-repo-creds in namespace patrol created
+        /Secret e2e-git-http-creds in namespace patrol created
+        /Secret e2e-git-ssh-creds in namespace patrol created
+        /Secret patrol-secret in namespace patrol updated
+        cd.patrol.example/Application e2e-guestbook in namespace patrol created
+        cd.patrol.example/Application e2e-guestbook-ssh in namespace patrol created
+        cd.patrol.example/Application e2e-helm-git in namespace patrol created
+        cd.patrol.example/Application e2e-kustomize-staging in namespace patrol created
+        cd.patrol.example/Application e2e-multi-source in namespace patrol created
+        cd.patrol.example/Application e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Application e2e-oci-manifests in namespace patrol created
+        Import process completed successfully in namespace patrol at 2026-11-03T04:38:56Z, duration: 120.745042ms
+PASS  import   the import reports success in namespace patrol
+PASS  import   no warning from the import
+PASS  import   every object of the backup exists again
+== restored
+PASS  restored admin login with the password from before the drill
+PASS  restored the password the new installation generated is refused
+PASS  restored e2e-guestbook is Synced/Healthy
+PASS  restored e2e-guestbook-ssh is Synced/Healthy
+PASS  restored e2e-helm-git is Synced/Healthy
+PASS  restored e2e-kustomize-staging is Synced/Healthy
+PASS  restored e2e-multi-source is Synced/Healthy
+PASS  restored e2e-oci-chart is Synced/Healthy
+PASS  restored e2e-oci-manifests is Synced/Healthy
+PASS  restored no Operation was created (nothing was synced)
+PASS  restored e2e-guestbook has its finalizer again
+PASS  restored GET the private Helm repository through the API
+PASS  restored its restored credential passes the connection check
+PASS  restored the private Helm repository refuses anonymous requests
+PASS  restored UIDs and generations of the e2e-* objects on patrol-target are unchanged (39 objects)
+== cleanup
+PASS  cleanup  the drill's finalizer is removed from e2e-guestbook
+Error from server (BadRequest): error decoding patch: invalid character '\r' in string literal
+FAIL  cleanup  update patrol-initial-admin-secret
+
+restore-drill: 58 passed, 1 failed
+restore-drill: WARNING: the restore did not complete in patrol-control/patrol; run: make kind-install (then make kind-verify)
+make: *** [hack/kind/kind.mk:45: kind-restore-drill] Error 1
+
+== §2 make kind-restore-drill (run 2; exit 0, 130 s)
+hack/kind/restore-drill.sh 
+== preconditions (patrol-control/patrol)
+PASS  pre      Patrol pods Running and ready
+PASS  pre      fixture Applications registered
+PASS  pre      e2e-guestbook is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-guestbook-ssh is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-helm-git is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-kustomize-staging is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-multi-source is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-chart is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-manifests is Synced/Healthy (run make kind-verify first)
+PASS  pre      the 7 e2e Deployments on patrol-target are available
+PASS  pre      admin login with the password in patrol-initial-admin-secret
+PASS  pre      the installed image patrol-cd/patrol-cd:dev is in the local Docker (its patrol CLI runs the drill)
+PASS  pre      e2e-* Namespaces and Deployments recorded on patrol-target (39 objects)
+== backup
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  backup   e2e-guestbook carries resources-finalizer.cd.patrol.example
+PASS  backup   patrol admin export -n patrol
+PASS  backup   no warning from the export
+        1 kind: AppProject
+        7 kind: Application
+        1 kind: Cluster
+        6 kind: ConfigMap
+        5 kind: Repository
+        2 kind: RepositoryCredential
+        6 kind: Secret
+PASS  backup   the backup holds application.cd.patrol.example/e2e-guestbook
+PASS  backup   the backup holds cluster.cd.patrol.example/patrol-target
+PASS  backup   the backup holds secret/patrol-secret
+PASS  backup   the backup holds secret/cluster-patrol-target
+PASS  backup   the backup holds secret/e2e-git-http-creds
+PASS  backup   the backup holds secret/e2e-git-ssh-creds
+PASS  backup   the backup holds secret/e2e-chart-repo-creds
+PASS  backup   the backup holds configmap/patrol-cm
+PASS  backup   the backup holds configmap/patrol-ssh-known-hosts-cm
+PASS  backup   the backup leaves out secret/patrol-initial-admin-secret
+PASS  backup   the backup leaves out secret/patrol-internal-token
+PASS  backup   installed chart: patrol-cd-0.1.0
+== loss: namespace patrol
+PASS  loss     the application and ApplicationSet controllers are stopped
+PASS  loss     no Patrol CD object in patrol has finalizers
+PASS  loss     no Operation is in progress
+PASS  loss     namespace patrol deleted
+PASS  loss     the Patrol CD CRDs remain
+PASS  loss     the e2e-* objects on patrol-target are unchanged
+== reinstall (patrol-cd-0.1.0, saved values)
+PASS  install  helm install patrol with the saved values
+PASS  install  the same chart version is installed
+PASS  install  the new installation created the default AppProject
+PASS  install  the new installation generated another admin password
+== import
+PASS  import   patrol admin import -n patrol
+        import process started patrol
+        /ConfigMap patrol-ssh-known-hosts-cm in namespace patrol updated
+        cd.patrol.example/Repository e2e-git-public-guestbook in namespace patrol created
+        cd.patrol.example/Repository e2e-helm in namespace patrol created
+        cd.patrol.example/Repository e2e-helm-private in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-manifests in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-http in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-ssh in namespace patrol created
+        cd.patrol.example/Cluster patrol-target in namespace patrol created
+        /Secret cluster-patrol-target in namespace patrol created
+        /Secret e2e-chart-repo-creds in namespace patrol created
+        /Secret e2e-git-http-creds in namespace patrol created
+        /Secret e2e-git-ssh-creds in namespace patrol created
+        /Secret patrol-secret in namespace patrol updated
+        cd.patrol.example/Application e2e-guestbook in namespace patrol created
+        cd.patrol.example/Application e2e-guestbook-ssh in namespace patrol created
+        cd.patrol.example/Application e2e-helm-git in namespace patrol created
+        cd.patrol.example/Application e2e-kustomize-staging in namespace patrol created
+        cd.patrol.example/Application e2e-multi-source in namespace patrol created
+        cd.patrol.example/Application e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Application e2e-oci-manifests in namespace patrol created
+        Import process completed successfully in namespace patrol at 2026-11-03T04:44:14Z, duration: 106.389792ms
+PASS  import   the import reports success in namespace patrol
+PASS  import   no warning from the import
+PASS  import   every object of the backup exists again
+== restored
+PASS  restored admin login with the password from before the drill
+PASS  restored the password the new installation generated is refused
+PASS  restored e2e-guestbook is Synced/Healthy
+PASS  restored e2e-guestbook-ssh is Synced/Healthy
+PASS  restored e2e-helm-git is Synced/Healthy
+PASS  restored e2e-kustomize-staging is Synced/Healthy
+PASS  restored e2e-multi-source is Synced/Healthy
+PASS  restored e2e-oci-chart is Synced/Healthy
+PASS  restored e2e-oci-manifests is Synced/Healthy
+PASS  restored no Operation was created (nothing was synced)
+PASS  restored e2e-guestbook has its finalizer again
+PASS  restored GET the private Helm repository through the API
+PASS  restored its restored credential passes the connection check
+PASS  restored the private Helm repository refuses anonymous requests
+PASS  restored UIDs and generations of the e2e-* objects on patrol-target are unchanged (39 objects)
+== cleanup
+PASS  cleanup  the drill's finalizer is removed from e2e-guestbook
+PASS  cleanup  patrol-initial-admin-secret holds the restored admin password
+
+restore-drill: 59 passed, 0 failed
+
+== §3 RESTORE_DRILL_FLAGS=--new-cluster make kind-restore-drill (run 3; exit 0, 182 s)
+hack/kind/restore-drill.sh --new-cluster
+== preconditions (patrol-control/patrol)
+PASS  pre      Patrol pods Running and ready
+PASS  pre      fixture Applications registered
+PASS  pre      e2e-guestbook is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-guestbook-ssh is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-helm-git is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-kustomize-staging is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-multi-source is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-chart is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-manifests is Synced/Healthy (run make kind-verify first)
+PASS  pre      the 7 e2e Deployments on patrol-target are available
+PASS  pre      admin login with the password in patrol-initial-admin-secret
+PASS  pre      the installed image patrol-cd/patrol-cd:dev is in the local Docker (its patrol CLI runs the drill)
+PASS  pre      e2e-* Namespaces and Deployments recorded on patrol-target (39 objects)
+== backup
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  backup   e2e-guestbook carries resources-finalizer.cd.patrol.example
+PASS  backup   patrol admin export -n patrol
+PASS  backup   no warning from the export
+        1 kind: AppProject
+        7 kind: Application
+        1 kind: Cluster
+        6 kind: ConfigMap
+        5 kind: Repository
+        2 kind: RepositoryCredential
+        6 kind: Secret
+PASS  backup   the backup holds application.cd.patrol.example/e2e-guestbook
+PASS  backup   the backup holds cluster.cd.patrol.example/patrol-target
+PASS  backup   the backup holds secret/patrol-secret
+PASS  backup   the backup holds secret/cluster-patrol-target
+PASS  backup   the backup holds secret/e2e-git-http-creds
+PASS  backup   the backup holds secret/e2e-git-ssh-creds
+PASS  backup   the backup holds secret/e2e-chart-repo-creds
+PASS  backup   the backup holds configmap/patrol-cm
+PASS  backup   the backup holds configmap/patrol-ssh-known-hosts-cm
+PASS  backup   the backup leaves out secret/patrol-initial-admin-secret
+PASS  backup   the backup leaves out secret/patrol-internal-token
+PASS  backup   installed chart: patrol-cd-0.1.0
+== loss: cluster patrol-control
+PASS  loss     kind cluster patrol-control deleted
+PASS  loss     kind cluster patrol-control created again
+PASS  loss     fixture credentials carried over to the new cluster
+PASS  loss     fixtures deployed again
+PASS  loss     the new cluster has no Patrol CD CRDs
+PASS  loss     the e2e-* objects on patrol-target are unchanged
+== reinstall (patrol-cd-0.1.0, saved values)
+PASS  install  helm install patrol with the saved values
+PASS  install  the same chart version is installed
+PASS  install  the new installation created the default AppProject
+PASS  install  the new installation generated another admin password
+== import
+PASS  import   patrol admin import -n patrol
+        import process started patrol
+        /ConfigMap patrol-ssh-known-hosts-cm in namespace patrol updated
+        cd.patrol.example/Repository e2e-git-public-guestbook in namespace patrol created
+        cd.patrol.example/Repository e2e-helm in namespace patrol created
+        cd.patrol.example/Repository e2e-helm-private in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-manifests in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-http in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-ssh in namespace patrol created
+        cd.patrol.example/Cluster patrol-target in namespace patrol created
+        /Secret cluster-patrol-target in namespace patrol created
+        /Secret e2e-chart-repo-creds in namespace patrol created
+        /Secret e2e-git-http-creds in namespace patrol created
+        /Secret e2e-git-ssh-creds in namespace patrol created
+        /Secret patrol-secret in namespace patrol updated
+        cd.patrol.example/Application e2e-guestbook in namespace patrol created
+        cd.patrol.example/Application e2e-guestbook-ssh in namespace patrol created
+        cd.patrol.example/Application e2e-helm-git in namespace patrol created
+        cd.patrol.example/Application e2e-kustomize-staging in namespace patrol created
+        cd.patrol.example/Application e2e-multi-source in namespace patrol created
+        cd.patrol.example/Application e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Application e2e-oci-manifests in namespace patrol created
+        Import process completed successfully in namespace patrol at 2026-11-03T04:47:31Z, duration: 98.326416ms
+PASS  import   the import reports success in namespace patrol
+PASS  import   no warning from the import
+PASS  import   every object of the backup exists again
+== restored
+PASS  restored admin login with the password from before the drill
+PASS  restored the password the new installation generated is refused
+PASS  restored e2e-guestbook is Synced/Healthy
+PASS  restored e2e-guestbook-ssh is Synced/Healthy
+PASS  restored e2e-helm-git is Synced/Healthy
+PASS  restored e2e-kustomize-staging is Synced/Healthy
+PASS  restored e2e-multi-source is Synced/Healthy
+PASS  restored e2e-oci-chart is Synced/Healthy
+PASS  restored e2e-oci-manifests is Synced/Healthy
+PASS  restored no Operation was created (nothing was synced)
+PASS  restored e2e-guestbook has its finalizer again
+PASS  restored GET the private Helm repository through the API
+PASS  restored its restored credential passes the connection check
+PASS  restored the private Helm repository refuses anonymous requests
+PASS  restored UIDs and generations of the e2e-* objects on patrol-target are unchanged (39 objects)
+== cleanup
+PASS  cleanup  the drill's finalizer is removed from e2e-guestbook
+PASS  cleanup  patrol-initial-admin-secret holds the restored admin password
+
+restore-drill: 59 passed, 0 failed
+
+== §4 test/e2e/fixtures/test-scripts.sh (envtest, simulated; restore-drill section and summary)
+== restore-drill.sh checks before the namespace deletion
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  listing, finalizers_left, strip_finalizers, active_operations, controller_pods, target_state, backup_names found (ok) backup_names
+PASS  finalizers_left lists an object of every kind in patrol_kinds  (ok) printed: 'Application/kept ["resources-finalizer.cd.patrol.example"] ApplicationSet/set ["resources-finalizer.cd.patrol.example"] AppProject/proj ["resources-finalizer.cd.patrol.example"] Operation/running ["example.com/hold"] Cluster/c ["example.com/hold"] Repository/r ["example.com/hold"] RepositoryCredential/rc ["example.com/hold"] SCMProvider/s ["example.com/hold"] '
+PASS  active_operations lists the Pending, Running, Terminating and phaseless Operations only (ok) printed: 'pending Pending running Running terminating Terminating unstarted  '
+PASS  controller_pods lists the application and ApplicationSet controller pods only (ok) printed: 'pod/patrol-applicationset-controller-a pod/patrol-controller-0 '
+PASS  strip_finalizers                                               (ok) 
+PASS  after strip_finalizers only the finalizers of the other kinds are left (ok) printed: 'Operation/running ["example.com/hold"] Cluster/c ["example.com/hold"] Repository/r ["example.com/hold"] RepositoryCredential/rc ["example.com/hold"] SCMProvider/s ["example.com/hold"] '
+PASS  finalizers_left prints nothing once none is left               (ok) printed: ''
+PASS  listing joins the lines a command prints                       (ok) printed: 'a b'
+PASS  listing prints nothing for an empty list                       (ok) printed: ''
+PASS  finalizers_left fails when the API server does not answer      (fail) the server was unable to return a response in the time allotted
+PASS  strip_finalizers fails when the API server does not answer     (fail) the server was unable to return a response in the time allotted
+PASS  active_operations fails when the API server does not answer    (fail) the server was unable to return a response in the time allotted
+PASS  controller_pods fails when the API server does not answer      (fail) the server was unable to return a response in the time allotted
+PASS  listing reports the error when the API server does not answer  (ok) printed: 'error: the server was unable to return a response in the time allotted '
+PASS  target_state lists the e2e-* Namespace, Deployment, ReplicaSet, Pod and Service with UID and generation, nothing else (ok) 
+PASS  backup_names prints the objects of a backup                    (ok) printed: 'configmap/present '
+PASS  backup_names fails when an object of the backup is missing     (fail) Error from server (NotFound): configmaps "absent" not found
+test-scripts: 96 passed, 0 failed
+
+== §5 make kind-restore-drill (run 4, the script after the review changes; exit 0, 131 s)
+hack/kind/restore-drill.sh 
+== preconditions (patrol-control/patrol)
+PASS  pre      Patrol pods Running and ready
+PASS  pre      fixture Applications registered
+PASS  pre      e2e-guestbook is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-guestbook-ssh is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-helm-git is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-kustomize-staging is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-multi-source is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-chart is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-manifests is Synced/Healthy (run make kind-verify first)
+PASS  pre      the 7 e2e Deployments on patrol-target are available
+PASS  pre      admin login with the password in patrol-initial-admin-secret
+PASS  pre      the installed image patrol-cd/patrol-cd:dev is in the local Docker (its patrol CLI runs the drill)
+PASS  pre      e2e-* Namespaces and Deployments recorded on patrol-target (39 objects)
+== backup
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  backup   e2e-guestbook carries resources-finalizer.cd.patrol.example
+PASS  backup   patrol admin export -n patrol
+PASS  backup   no warning from the export
+        1 kind: AppProject
+        7 kind: Application
+        1 kind: Cluster
+        6 kind: ConfigMap
+        5 kind: Repository
+        2 kind: RepositoryCredential
+        6 kind: Secret
+PASS  backup   the backup holds application.cd.patrol.example/e2e-guestbook
+PASS  backup   the backup holds cluster.cd.patrol.example/patrol-target
+PASS  backup   the backup holds secret/patrol-secret
+PASS  backup   the backup holds secret/cluster-patrol-target
+PASS  backup   the backup holds secret/e2e-git-http-creds
+PASS  backup   the backup holds secret/e2e-git-ssh-creds
+PASS  backup   the backup holds secret/e2e-chart-repo-creds
+PASS  backup   the backup holds configmap/patrol-cm
+PASS  backup   the backup holds configmap/patrol-ssh-known-hosts-cm
+PASS  backup   the backup leaves out secret/patrol-initial-admin-secret
+PASS  backup   the backup leaves out secret/patrol-internal-token
+PASS  backup   installed chart: patrol-cd-0.1.0
+== loss: namespace patrol
+PASS  loss     the application and ApplicationSet controllers are stopped
+PASS  loss     no Patrol CD object in patrol has finalizers
+PASS  loss     no Operation is in progress
+PASS  loss     namespace patrol deleted
+PASS  loss     the Patrol CD CRDs remain
+PASS  loss     the e2e-* objects on patrol-target are unchanged
+== reinstall (patrol-cd-0.1.0, saved values)
+PASS  install  helm install patrol with the saved values
+PASS  install  the same chart version is installed
+PASS  install  the new installation created the default AppProject
+PASS  install  the new installation generated another admin password
+== import
+PASS  import   patrol admin import -n patrol
+        import process started patrol
+        /ConfigMap patrol-ssh-known-hosts-cm in namespace patrol updated
+        cd.patrol.example/Repository e2e-git-public-guestbook in namespace patrol created
+        cd.patrol.example/Repository e2e-helm in namespace patrol created
+        cd.patrol.example/Repository e2e-helm-private in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-manifests in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-http in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-ssh in namespace patrol created
+        cd.patrol.example/Cluster patrol-target in namespace patrol created
+        /Secret cluster-patrol-target in namespace patrol created
+        /Secret e2e-chart-repo-creds in namespace patrol created
+        /Secret e2e-git-http-creds in namespace patrol created
+        /Secret e2e-git-ssh-creds in namespace patrol created
+        /Secret patrol-secret in namespace patrol updated
+        cd.patrol.example/Application e2e-guestbook in namespace patrol created
+        cd.patrol.example/Application e2e-guestbook-ssh in namespace patrol created
+        cd.patrol.example/Application e2e-helm-git in namespace patrol created
+        cd.patrol.example/Application e2e-kustomize-staging in namespace patrol created
+        cd.patrol.example/Application e2e-multi-source in namespace patrol created
+        cd.patrol.example/Application e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Application e2e-oci-manifests in namespace patrol created
+        Import process completed successfully in namespace patrol at 2026-11-03T05:21:14Z, duration: 125.679375ms
+PASS  import   the import reports success in namespace patrol
+PASS  import   no warning from the import
+PASS  import   every object of the backup exists again
+== restored
+PASS  restored admin login with the password from before the drill
+PASS  restored the password the new installation generated is refused
+PASS  restored e2e-guestbook is Synced/Healthy
+PASS  restored e2e-guestbook-ssh is Synced/Healthy
+PASS  restored e2e-helm-git is Synced/Healthy
+PASS  restored e2e-kustomize-staging is Synced/Healthy
+PASS  restored e2e-multi-source is Synced/Healthy
+PASS  restored e2e-oci-chart is Synced/Healthy
+PASS  restored e2e-oci-manifests is Synced/Healthy
+PASS  restored no Operation was created (nothing was synced)
+PASS  restored e2e-guestbook has its finalizer again
+PASS  restored GET the private Helm repository through the API
+PASS  restored its restored credential passes the connection check
+PASS  restored the private Helm repository refuses anonymous requests
+PASS  restored UIDs and generations of the e2e-* objects on patrol-target are unchanged (39 objects)
+== cleanup
+PASS  cleanup  the drill's finalizer is removed from e2e-guestbook
+PASS  cleanup  patrol-initial-admin-secret holds the restored admin password
+
+restore-drill: 59 passed, 0 failed
+
+== §6 RESTORE_DRILL_FLAGS=--new-cluster make kind-restore-drill (run 5, the script after the review changes; exit 0, 179 s)
+hack/kind/restore-drill.sh --new-cluster
+== preconditions (patrol-control/patrol)
+PASS  pre      Patrol pods Running and ready
+PASS  pre      fixture Applications registered
+PASS  pre      e2e-guestbook is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-guestbook-ssh is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-helm-git is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-kustomize-staging is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-multi-source is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-chart is Synced/Healthy (run make kind-verify first)
+PASS  pre      e2e-oci-manifests is Synced/Healthy (run make kind-verify first)
+PASS  pre      the 7 e2e Deployments on patrol-target are available
+PASS  pre      admin login with the password in patrol-initial-admin-secret
+PASS  pre      the installed image patrol-cd/patrol-cd:dev is in the local Docker (its patrol CLI runs the drill)
+PASS  pre      e2e-* Namespaces and Deployments recorded on patrol-target (39 objects)
+== backup
+Warning: metadata.finalizers: "resources-finalizer.cd.patrol.example": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+PASS  backup   e2e-guestbook carries resources-finalizer.cd.patrol.example
+PASS  backup   patrol admin export -n patrol
+PASS  backup   no warning from the export
+        1 kind: AppProject
+        7 kind: Application
+        1 kind: Cluster
+        6 kind: ConfigMap
+        5 kind: Repository
+        2 kind: RepositoryCredential
+        6 kind: Secret
+PASS  backup   the backup holds application.cd.patrol.example/e2e-guestbook
+PASS  backup   the backup holds cluster.cd.patrol.example/patrol-target
+PASS  backup   the backup holds secret/patrol-secret
+PASS  backup   the backup holds secret/cluster-patrol-target
+PASS  backup   the backup holds secret/e2e-git-http-creds
+PASS  backup   the backup holds secret/e2e-git-ssh-creds
+PASS  backup   the backup holds secret/e2e-chart-repo-creds
+PASS  backup   the backup holds configmap/patrol-cm
+PASS  backup   the backup holds configmap/patrol-ssh-known-hosts-cm
+PASS  backup   the backup leaves out secret/patrol-initial-admin-secret
+PASS  backup   the backup leaves out secret/patrol-internal-token
+PASS  backup   installed chart: patrol-cd-0.1.0
+== loss: cluster patrol-control
+PASS  loss     kind cluster patrol-control deleted
+PASS  loss     kind cluster patrol-control created again
+PASS  loss     fixture credentials carried over to the new cluster
+PASS  loss     fixtures deployed again
+PASS  loss     the new cluster has no Patrol CD CRDs
+PASS  loss     the e2e-* objects on patrol-target are unchanged
+== reinstall (patrol-cd-0.1.0, saved values)
+PASS  install  helm install patrol with the saved values
+PASS  install  the same chart version is installed
+PASS  install  the new installation created the default AppProject
+PASS  install  the new installation generated another admin password
+== import
+PASS  import   patrol admin import -n patrol
+        import process started patrol
+        /ConfigMap patrol-ssh-known-hosts-cm in namespace patrol updated
+        cd.patrol.example/Repository e2e-git-public-guestbook in namespace patrol created
+        cd.patrol.example/Repository e2e-helm in namespace patrol created
+        cd.patrol.example/Repository e2e-helm-private in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Repository e2e-oci-manifests in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-http in namespace patrol created
+        cd.patrol.example/RepositoryCredential e2e-git-ssh in namespace patrol created
+        cd.patrol.example/Cluster patrol-target in namespace patrol created
+        /Secret cluster-patrol-target in namespace patrol created
+        /Secret e2e-chart-repo-creds in namespace patrol created
+        /Secret e2e-git-http-creds in namespace patrol created
+        /Secret e2e-git-ssh-creds in namespace patrol created
+        /Secret patrol-secret in namespace patrol updated
+        cd.patrol.example/Application e2e-guestbook in namespace patrol created
+        cd.patrol.example/Application e2e-guestbook-ssh in namespace patrol created
+        cd.patrol.example/Application e2e-helm-git in namespace patrol created
+        cd.patrol.example/Application e2e-kustomize-staging in namespace patrol created
+        cd.patrol.example/Application e2e-multi-source in namespace patrol created
+        cd.patrol.example/Application e2e-oci-chart in namespace patrol created
+        cd.patrol.example/Application e2e-oci-manifests in namespace patrol created
+        Import process completed successfully in namespace patrol at 2026-11-03T05:24:14Z, duration: 122.686042ms
+PASS  import   the import reports success in namespace patrol
+PASS  import   no warning from the import
+PASS  import   every object of the backup exists again
+== restored
+PASS  restored admin login with the password from before the drill
+PASS  restored the password the new installation generated is refused
+PASS  restored e2e-guestbook is Synced/Healthy
+PASS  restored e2e-guestbook-ssh is Synced/Healthy
+PASS  restored e2e-helm-git is Synced/Healthy
+PASS  restored e2e-kustomize-staging is Synced/Healthy
+PASS  restored e2e-multi-source is Synced/Healthy
+PASS  restored e2e-oci-chart is Synced/Healthy
+PASS  restored e2e-oci-manifests is Synced/Healthy
+PASS  restored no Operation was created (nothing was synced)
+PASS  restored e2e-guestbook has its finalizer again
+PASS  restored GET the private Helm repository through the API
+PASS  restored its restored credential passes the connection check
+PASS  restored the private Helm repository refuses anonymous requests
+PASS  restored UIDs and generations of the e2e-* objects on patrol-target are unchanged (39 objects)
+== cleanup
+PASS  cleanup  the drill's finalizer is removed from e2e-guestbook
+PASS  cleanup  patrol-initial-admin-secret holds the restored admin password
+
+restore-drill: 59 passed, 0 failed

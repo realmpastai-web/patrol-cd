@@ -11,6 +11,8 @@ KIND_LOAD_CLUSTER ?= all
 KIND_LOAD_REGISTRY ?=
 # Flags for kind-verify, e.g. --lifecycle.
 VERIFY_FLAGS ?=
+# Flags for kind-restore-drill, e.g. --new-cluster.
+RESTORE_DRILL_FLAGS ?=
 
 ##@ Kind (disposable local clusters)
 
@@ -37,6 +39,10 @@ kind-smoke: ## Run the fixture smoke checks (cross-cluster API, git over HTTP an
 .PHONY: kind-verify
 kind-verify: ## Check the installation against the live clusters (VERIFY_FLAGS=--lifecycle adds rollback, password change, uninstall, re-install).
 	$(KIND_DIR)/verify-install.sh $(VERIFY_FLAGS)
+
+.PHONY: kind-restore-drill
+kind-restore-drill: ## Back up, lose (the namespace; RESTORE_DRILL_FLAGS=--new-cluster: the cluster), reinstall and restore Patrol CD, then check the restore.
+	$(KIND_DIR)/restore-drill.sh $(RESTORE_DRILL_FLAGS)
 
 .PHONY: kind-status
 kind-status: ## Show patrol-* clusters, nodes, registry and kubeconfig paths.

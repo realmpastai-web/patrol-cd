@@ -364,7 +364,8 @@ use Helm for that.
 
 ## Upgrade
 
-Apply the new version's file (or overlay) the same way as the installation:
+Take a backup first ([backup-restore.md](backup-restore.md)). Apply the new version's file (or
+overlay) the same way as the installation:
 
 ```bash
 kubectl apply --server-side --force-conflicts -f deploy/manifests/install.yaml
