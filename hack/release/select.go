@@ -28,10 +28,12 @@ import (
 // checks only).
 
 // releaseBranch and releaseTitlePrefix are the head branch and the title release-pr.yml gives the
-// release pull request ("chore(release): vX.Y.Z").
+// release pull request ("chore(release): vX.Y.Z"); releaseEnvironment is the environment the
+// image and publish jobs of release.yml run in, whose required reviewer approves each release.
 const (
 	releaseBranch      = "release/next"
 	releaseTitlePrefix = "chore(release): v"
+	releaseEnvironment = "release"
 )
 
 // requiredJobs are the CI jobs (names as GitHub reports them, .github/workflows/ci.yml) that
@@ -127,7 +129,9 @@ type pullRequest struct {
 // sha, or 0 when sha is not one: the pull request must be merged into the branch, its merge
 // (merge, squash or rebased commit) must be sha, and it must come from releaseBranch of this
 // repository with the title release-pr.yml gives it. The repository is what tells it apart: a
-// fork controls its branch name and its title, not its repository.
+// fork controls its branch name and its title, not its repository. GitHub's owner and repository
+// names are ASCII and case-insensitive, and it answers with their canonical case whatever case
+// -repo has.
 func (c *ciChecker) releasePull(ctx context.Context, sha string, v version) (int, error) {
 	var pulls []pullRequest
 	if err := c.get(ctx, "/repos/"+c.repo+"/commits/"+url.PathEscape(sha)+"/pulls?per_page=100", &pulls); err != nil {
@@ -135,11 +139,37 @@ func (c *ciChecker) releasePull(ctx context.Context, sha string, v version) (int
 	}
 	for _, p := range pulls {
 		if p.MergedAt != nil && p.MergeCommitSHA == sha && p.Base.Ref == c.branch &&
-			p.Head.Ref == releaseBranch && p.Head.Repo.FullName == c.repo && p.Title == releaseTitlePrefix+v.String() {
+			p.Head.Ref == releaseBranch && strings.EqualFold(p.Head.Repo.FullName, c.repo) && p.Title == releaseTitlePrefix+v.String() {
 			return p.Number, nil
 		}
 	}
 	return 0, nil
+}
+
+// environmentGuarded reports whether releaseEnvironment exists and has a required reviewer. GitHub
+// creates an environment a job names on first use, without protection, so without this check a
+// release could publish before the owner set the environment up (docs/guides/releasing.md).
+func (c *ciChecker) environmentGuarded(ctx context.Context) (bool, error) {
+	var env struct {
+		ProtectionRules []struct {
+			Type      string            `json:"type"`
+			Reviewers []json.RawMessage `json:"reviewers"`
+		} `json:"protection_rules"`
+	}
+	err := c.get(ctx, "/repos/"+c.repo+"/environments/"+releaseEnvironment, &env)
+	var se *statusError
+	if errors.As(err, &se) && se.status == http.StatusNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, r := range env.ProtectionRules {
+		if r.Type == "required_reviewers" && len(r.Reviewers) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // check reports whether CI passed on a push of sha to the branch. Only the newest run counts: a
@@ -210,6 +240,17 @@ func orDefault(s, def string) string {
 	return s
 }
 
+// statusError is a GET that GitHub answered with a status other than 200.
+type statusError struct {
+	path   string
+	status int
+	body   []byte
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("GET %s: HTTP %d: %.200s", e.path, e.status, e.body)
+}
+
 func (c *ciChecker) get(ctx context.Context, path string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.api, "/")+path, nil)
 	if err != nil {
@@ -230,7 +271,7 @@ func (c *ciChecker) get(ctx context.Context, path string, v any) error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d: %.200s", path, resp.StatusCode, body)
+		return &statusError{path: path, status: resp.StatusCode, body: body}
 	}
 	if err := json.Unmarshal(body, v); err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
@@ -276,20 +317,37 @@ func (r *repo) selectRelease(ctx context.Context, c *ciChecker) (selection, erro
 	if c == nil {
 		return sel, errors.New("no GitHub API access configured")
 	}
+	guarded, err := c.environmentGuarded(ctx)
+	if err != nil {
+		return sel, err
+	}
+	if !guarded {
+		sel.ci = ciFailed
+		sel.ciReason = fmt.Sprintf("the environment %q that the image and publish jobs run in does not exist or has no required reviewer; "+
+			"set it up as docs/guides/releasing.md describes, then re-run this run", releaseEnvironment)
+		return sel, nil
+	}
 	for _, sha := range candidates {
 		// The release commit carries the release as main describes it: the chart version and the
-		// same section. A later edit of the section, or a reverted re-prepare, leaves no commit
-		// that does until the version is prepared again.
-		chart, err := git(ctx, r.root, "show", sha+":"+chartDir+"/Chart.yaml")
+		// same section. A later edit of the section leaves no commit that does until the version
+		// is prepared again; reverting a re-prepare brings back the release commit before it. A
+		// commit without either file (one that deleted or moved it) is not the release commit.
+		chart, ok, err := showFile(ctx, r.root, sha, chartDir+"/Chart.yaml")
 		if err != nil {
 			return sel, err
+		}
+		if !ok {
+			continue
 		}
 		if v, err := chartVersion(chart); err != nil || v != st.current {
 			continue
 		}
-		changelog, err := git(ctx, r.root, "show", sha+":"+changelogFile)
+		changelog, ok, err := showFile(ctx, r.root, sha, changelogFile)
 		if err != nil {
 			return sel, err
+		}
+		if !ok {
+			continue
 		}
 		if got, ok := section(changelog, st.current); !ok || got != want {
 			continue
@@ -315,6 +373,19 @@ func (r *repo) selectRelease(ctx context.Context, c *ciChecker) (selection, erro
 		"with the %s section main has; prepare %s again with the Release PR workflow, or re-run this run if GitHub has not linked the pull request yet",
 		len(candidates), since, changelogFile, releaseBranch, releaseTitlePrefix+st.current.String(), st.current, st.current)
 	return sel, nil
+}
+
+// showFile returns the content of path in commit sha, and false when the commit has no such file.
+func showFile(ctx context.Context, dir, sha, path string) (string, bool, error) {
+	out, err := git(ctx, dir, "ls-tree", "--name-only", sha, "--", path)
+	if err != nil || out == "" {
+		return "", false, err
+	}
+	content, err := git(ctx, dir, "show", sha+":"+path)
+	if err != nil {
+		return "", false, err
+	}
+	return content, true, nil
 }
 
 // section returns the CHANGELOG.md section of v, heading included.

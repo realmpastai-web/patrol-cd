@@ -11,7 +11,8 @@
 # push of that very commit passed every job of the full tier. A later commit is never tagged (its
 # changes would be in the tag but in no changelog section), and a run that skipped jobs (a
 # documentation-only push runs the static checks only) never counts. The image and publish jobs
-# then wait for the owner's approval in the environment `release`, once each:
+# then wait for the owner's approval in the environment `release`, once each; plan blocks the
+# release while that environment does not exist or has no required reviewer:
 #
 #   1. artifacts  the patrol CLI for Linux, macOS and Windows (amd64, arm64), the install manifests
 #                 (install.yaml, namespace-install.yaml, core-install.yaml, ha-*.yaml, crds.yaml,
@@ -69,7 +70,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read # the CI runs and jobs of the release commit
+      actions: read # the CI runs and jobs of the release commit, and the environment release
       pull-requests: read # the pull requests of the commits that changed CHANGELOG.md
     outputs:
       release: ${{ steps.select.outputs.release }}

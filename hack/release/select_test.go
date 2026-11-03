@@ -28,6 +28,10 @@ type fakeGitHub struct {
 	pulls       map[string][]pullRequest
 	rawPulls    map[string]string
 	pullsStatus int
+	// env is the release environment as GitHub answers it ("": one with a required reviewer);
+	// envStatus, when set, answers with that status instead.
+	env       string
+	envStatus int
 	// queries records the query strings of the runs listing.
 	queries []string
 }
@@ -39,7 +43,20 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.URL.Path == "/repos/o/r/actions/workflows/ci.yml/runs" {
+	// Like GitHub: owner and repository names are case-insensitive.
+	path := strings.ToLower(r.URL.Path)
+	if path == "/repos/o/r/environments/release" {
+		switch {
+		case f.envStatus != 0:
+			http.Error(w, "unavailable", f.envStatus)
+		case f.env != "":
+			_, _ = w.Write([]byte(f.env))
+		default:
+			_, _ = w.Write([]byte(protectedEnvironment))
+		}
+		return
+	}
+	if path == "/repos/o/r/actions/workflows/ci.yml/runs" {
 		f.queries = append(f.queries, r.URL.RawQuery)
 		// Like GitHub: filter by head_sha only, so that the client's own checks of event and
 		// branch are exercised.
@@ -52,7 +69,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(out), "workflow_runs": out})
 		return
 	}
-	if rest, ok := strings.CutPrefix(r.URL.Path, "/repos/o/r/commits/"); ok {
+	if rest, ok := strings.CutPrefix(path, "/repos/o/r/commits/"); ok {
 		if sha, ok := strings.CutSuffix(rest, "/pulls"); ok {
 			switch {
 			case f.pullsStatus != 0:
@@ -67,12 +84,16 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var id int64
-	if _, err := fmt.Sscanf(r.URL.Path, "/repos/o/r/actions/runs/%d/jobs", &id); err == nil {
+	if _, err := fmt.Sscanf(path, "/repos/o/r/actions/runs/%d/jobs", &id); err == nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"jobs": f.jobs[id]})
 		return
 	}
 	http.NotFound(w, r)
 }
+
+// protectedEnvironment is GitHub's answer for an environment with the owner as required reviewer.
+const protectedEnvironment = `{"id":1,"name":"release","protection_rules":[{"id":2,"node_id":"x","prevent_self_review":false,"type":"required_reviewers",` +
+	`"reviewers":[{"type":"User","reviewer":{"login":"o","id":3}}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}`
 
 // mergedPull is pull request number of repository repo from branch head, titled title, merged
 // into main as sha.
@@ -218,11 +239,13 @@ func TestReleasePull(t *testing.T) {
 	}
 	tests := []struct {
 		name  string
+		repo  string // -repo ("": o/r)
 		pulls []pullRequest
 		raw   string
 		want  int
 	}{
 		{name: "the release pull request", pulls: []pullRequest{releasePR(5, sha, "0.2.0")}, want: 5},
+		{name: "-repo in another case than GitHub's", repo: "O/R", pulls: []pullRequest{releasePR(5, sha, "0.2.0")}, want: 5},
 		{name: "found among other pull requests of the commit",
 			pulls: []pullRequest{mergedPull(3, "3333333333333333333333333333333333333333", "o/r", "feature", "feat: x"), releasePR(5, sha, "0.2.0")}, want: 5},
 		{name: "no pull request: a direct push"},
@@ -244,7 +267,7 @@ func TestReleasePull(t *testing.T) {
 			gh := &fakeGitHub{pulls: map[string][]pullRequest{sha: tc.pulls}, rawPulls: map[string]string{sha: tc.raw}}
 			srv := httptest.NewServer(gh)
 			defer srv.Close()
-			c := &ciChecker{client: srv.Client(), api: srv.URL, repo: "o/r", token: "test-token", workflow: "ci.yml", branch: "main"}
+			c := &ciChecker{client: srv.Client(), api: srv.URL, repo: orDefault(tc.repo, "o/r"), token: "test-token", workflow: "ci.yml", branch: "main"}
 			got, err := c.releasePull(context.Background(), sha, v)
 			if err != nil || got != tc.want {
 				t.Fatalf("releasePull = %d, %v; want %d", got, err, tc.want)
@@ -263,6 +286,52 @@ func TestReleasePull(t *testing.T) {
 // TestReleaseWorkflowsMatch fails when the workflows drift from what the release check assumes:
 // the branch and title release-pr.yml gives the release pull request, and a concurrency group of
 // release.yml that only the events of its plan job share.
+func TestEnvironmentGuarded(t *testing.T) {
+	t.Parallel()
+	rule := func(typ, reviewers string) string {
+		return `{"name":"release","protection_rules":[{"id":2,"type":"` + typ + `"` + reviewers + `}]}`
+	}
+	tests := []struct {
+		name    string
+		env     string
+		status  int
+		want    bool
+		wantErr string
+	}{
+		{name: "a required reviewer", want: true},
+		{name: "a team as required reviewer", env: rule("required_reviewers", `,"prevent_self_review":true,"reviewers":[{"type":"Team","reviewer":{"slug":"x"}}]`), want: true},
+		{name: "a required reviewer among other rules", env: `{"protection_rules":[{"type":"wait_timer","wait_timer":5},` +
+			`{"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"o"}}]}]}`, want: true},
+		{name: "no environment", status: http.StatusNotFound},
+		{name: "no protection rules", env: `{"name":"release","protection_rules":[]}`},
+		{name: "no protection rules field", env: `{"name":"release"}`},
+		{name: "a wait timer only", env: rule("wait_timer", `,"wait_timer":30`)},
+		{name: "a branch policy only", env: rule("branch_policy", "")},
+		{name: "required reviewers with nobody in them", env: rule("required_reviewers", `,"reviewers":[]`)},
+		{name: "forbidden", status: http.StatusForbidden, wantErr: "HTTP 403"},
+		{name: "server error", status: http.StatusInternalServerError, wantErr: "HTTP 500"},
+		{name: "not JSON", env: "<html>", wantErr: "invalid character"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(&fakeGitHub{env: tc.env, envStatus: tc.status})
+			defer srv.Close()
+			c := &ciChecker{client: srv.Client(), api: srv.URL, repo: "o/r", token: "test-token", workflow: "ci.yml", branch: "main"}
+			got, err := c.environmentGuarded(context.Background())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("environmentGuarded = %t, %v; want an error with %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("environmentGuarded = %t, %v; want %t", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestReleaseWorkflowsMatch(t *testing.T) {
 	t.Parallel()
 	pr, err := os.ReadFile("../../.github/workflows/release-pr.yml")
@@ -283,6 +352,10 @@ func TestReleaseWorkflowsMatch(t *testing.T) {
 	plan := regexp.MustCompile(`(?m)^  plan:\n(?:    .*\n)*?    if: >-\n((?:      .*\n)+)`).FindSubmatch(rel)
 	if group == nil || plan == nil {
 		t.Fatalf("release.yml: concurrency group %q, plan if %q", group, plan)
+	}
+	// The image and publish jobs run in the environment whose protection select checks.
+	if n := strings.Count(string(rel), "\n    environment: "+releaseEnvironment+"\n"); n != 2 {
+		t.Errorf("release.yml names the environment %q in %d jobs, want 2 (image and publish)", releaseEnvironment, n)
 	}
 	oneLine := func(b []byte) string { return strings.Join(strings.Fields(string(b)), " ") }
 	if want := "(" + oneLine(plan[1]) + ") && 'release' || format('release-ignored-{0}', github.run_id)"; oneLine(group[1]) != want {
@@ -324,7 +397,7 @@ func TestSelectRelease(t *testing.T) {
 	r.commit("feat(cli): sneaked in")
 	tip := r.head()
 
-	gh, sel, addRun := selectionHarness(t, dir)
+	gh, sel, try, addRun := selectionHarness(t, dir)
 
 	// GitHub has not linked the merge to its pull request (yet): no commit qualifies, and the
 	// reason says to re-run rather than naming a commit. Only the merge since v0.1.0 was looked at.
@@ -349,6 +422,30 @@ func TestSelectRelease(t *testing.T) {
 	addRun(3, releaseSHA, allJobs("success"))
 	if s := sel(); !s.release() || s.sha != releaseSHA {
 		t.Fatalf("full pass: sha=%.7s release=%t (%s)", s.sha, s.release(), s.ciReason)
+	}
+	// Without a protected environment the publishing jobs would run unapproved: blocked.
+	for _, env := range []string{`{"name":"release","protection_rules":[]}`, `{"name":"release"}`} {
+		gh.env = env
+		if s := sel(); s.release() || s.ci != ciFailed || !strings.Contains(s.ciReason, `environment "release"`) || !strings.Contains(s.ciReason, "re-run") {
+			t.Fatalf("environment %s: %+v", env, s)
+		}
+	}
+	gh.env, gh.envStatus = "", http.StatusNotFound
+	if s := sel(); s.release() || s.ci != ciFailed || !strings.Contains(s.ciReason, `environment "release"`) {
+		t.Fatalf("no environment: %+v", s)
+	}
+	// API errors fail the run with the status; they are not read as an answer.
+	gh.envStatus = http.StatusForbidden
+	if _, err := try(); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("environment API error not reported: %v", err)
+	}
+	gh.envStatus, gh.pullsStatus = 0, http.StatusBadGateway
+	if _, err := try(); err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("pull request API error not reported: %v", err)
+	}
+	gh.pullsStatus = 0
+	if s := sel(); !s.release() || s.sha != releaseSHA {
+		t.Fatalf("protected again: sha=%.7s release=%t (%s)", s.sha, s.release(), s.ciReason)
 	}
 
 	// A later pull request from a fork changes CHANGELOG.md outside the pending section, with the
@@ -391,8 +488,9 @@ func TestSelectRelease(t *testing.T) {
 }
 
 // selectionHarness returns a fake GitHub for the scratch repository in dir, a selectRelease call
-// on it and a way to add a completed push run of CI with the given jobs.
-func selectionHarness(t *testing.T, dir string) (*fakeGitHub, func() selection, func(id int64, sha string, jobs []workflowJob)) {
+// on it (sel fails the test on an error, try returns it) and a way to add a completed push run of
+// CI with the given jobs.
+func selectionHarness(t *testing.T, dir string) (*fakeGitHub, func() selection, func() (selection, error), func(id int64, sha string, jobs []workflowJob)) {
 	t.Helper()
 	gh := &fakeGitHub{jobs: map[int64][]workflowJob{}, pulls: map[string][]pullRequest{}}
 	srv := httptest.NewServer(gh)
@@ -405,15 +503,16 @@ func selectionHarness(t *testing.T, dir string) (*fakeGitHub, func() selection, 
 		gh.runs = append(gh.runs, workflowRun{ID: id, HeadSHA: sha, HeadBranch: "main", Event: "push", Status: "completed", Conclusion: "success", CreatedAt: at.Add(time.Duration(id) * time.Minute)})
 		gh.jobs[id] = jobs
 	}
+	try := func() (selection, error) { return (&repo{root: dir}).selectRelease(context.Background(), c) }
 	sel := func() selection {
 		t.Helper()
-		s, err := (&repo{root: dir}).selectRelease(context.Background(), c)
+		s, err := try()
 		if err != nil {
 			t.Fatal(err)
 		}
 		return s
 	}
-	return gh, sel, addRun
+	return gh, sel, try, addRun
 }
 
 func (f *fakeGitHub) addPull(p pullRequest) {
@@ -444,7 +543,7 @@ func TestSelectReleaseSquashAndReprepare(t *testing.T) {
 		}
 		return b.String()
 	}
-	gh, sel, addRun := selectionHarness(t, dir)
+	gh, sel, _, addRun := selectionHarness(t, dir)
 
 	// No tag and Chart.yaml at 0.1.0: a pull request that adds a 0.1.0 section makes a release
 	// pending. It comes from a fork with a passing CI run, and it is not released.
@@ -496,6 +595,81 @@ func TestSelectReleaseSquashAndReprepare(t *testing.T) {
 	r.git("revert", "--no-edit", "HEAD")
 	if s := sel(); s.sha != first || s.pull != 6 || s.ci != ciFailed || s.release() {
 		t.Fatalf("after reverting the re-prepare: sha=%.7s (want %.7s) pull=%d ci=%s", s.sha, first, s.pull, s.ci)
+	}
+}
+
+// TestSelectReleaseSkipsCandidates: a commit that changed CHANGELOG.md is not the release commit
+// when its chart has another version or it has no CHANGELOG.md or Chart.yaml at all, and such a
+// commit neither stops the walk nor fails the run.
+func TestSelectReleaseSkipsCandidates(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	r := newScratchRepo(t, dir)
+	chart := func(v string) string {
+		return "apiVersion: v2\nname: patrol-cd\nversion: " + v + "\nappVersion: \"" + v + "\"\n"
+	}
+	r.write(chartDir+"/Chart.yaml", chart("0.1.0"))
+	r.write(changelogFile, changelogHeader+"\n## [0.1.0] - 2026-10-19\n\n### Features\n\n- first\n")
+	r.commit("feat: first")
+	r.git("tag", "v0.1.0")
+	r.commit("feat(ui): second")
+	gh, sel, _, addRun := selectionHarness(t, dir)
+
+	// A release pull request edited by hand to keep the old chart version, then a direct push
+	// that bumps the chart: the merge does not carry version 0.2.0, so it is not released.
+	data, err := os.ReadFile(filepath.Join(dir, changelogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.write(changelogFile, strings.Replace(string(data), "\n## [0.1.0]", "\n## [0.2.0] - 2026-10-20\n\n### Features\n\n- second\n\n## [0.1.0]", 1))
+	r.commit("chore(release): v0.2.0 (#5)")
+	oldChart := r.head()
+	gh.addPull(releasePR(5, oldChart, "0.2.0"))
+	addRun(1, oldChart, allJobs("success"))
+	r.write(chartDir+"/Chart.yaml", chart("0.2.0"))
+	r.commit("chore: bump the chart")
+	if s := sel(); !s.status.pending() || s.sha != "" || s.ci != ciFailed || s.release() {
+		t.Fatalf("release pull request with the old chart version: %+v", s)
+	}
+
+	// Prepared properly: its squash is the release commit.
+	r.commit("fix(api): a fix")
+	var out bytes.Buffer
+	if err := run(ctx, []string{"prepare", "-root", dir, "-repo-url", "https://github.com/o/r", "-version", "0.2.0"}, &out); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	r.commit("chore(release): v0.2.0 (#6)")
+	releaseSHA := r.head()
+	gh.addPull(releasePR(6, releaseSHA, "0.2.0"))
+	addRun(2, releaseSHA, allJobs("success"))
+	if s := sel(); !s.release() || s.sha != releaseSHA || s.pull != 6 {
+		t.Fatalf("prepared: sha=%.7s (want %.7s) pull=%d release=%t (%s)", s.sha, releaseSHA, s.pull, s.release(), s.ciReason)
+	}
+
+	// A commit deletes CHANGELOG.md and a direct push reverts it: the walk passes over both and
+	// finds the release commit.
+	r.git("rm", "-q", changelogFile)
+	r.commit("docs: drop the changelog")
+	r.git("revert", "--no-edit", "HEAD")
+	if s := sel(); !s.release() || s.sha != releaseSHA {
+		t.Fatalf("after deleting and restoring CHANGELOG.md: sha=%.7s (want %.7s) release=%t (%s)", s.sha, releaseSHA, s.release(), s.ciReason)
+	}
+
+	// The same for a commit that changed CHANGELOG.md and deleted Chart.yaml.
+	data, err = os.ReadFile(filepath.Join(dir, changelogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.write(changelogFile, strings.Replace(string(data), "- first", "- first, reworded", 1))
+	r.git("rm", "-q", chartDir+"/Chart.yaml")
+	r.commit("chore: move the chart")
+	r.git("revert", "--no-edit", "HEAD")
+	if s := sel(); !s.release() || s.sha != releaseSHA {
+		t.Fatalf("after deleting and restoring Chart.yaml: sha=%.7s (want %.7s) release=%t (%s)", s.sha, releaseSHA, s.release(), s.ciReason)
 	}
 }
 

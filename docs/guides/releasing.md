@@ -46,15 +46,17 @@ merge the PR ──► CI on main (full tier) ──► Release workflow (releas
      commit, so a merge commit, a squash or the tip of a rebase).
 
    Any other commit that changed `CHANGELOG.md` is passed over: a pull request from a fork or from
-   another branch, or a direct push. One that leaves the X.Y.Z section alone does not block the
-   release; one that changes the section leaves no release commit until the version is prepared
-   again (below). The commit the event happened to point at is never used: a later commit would be
+   another branch, a direct push, or a commit without `CHANGELOG.md` or `Chart.yaml`. One that
+   leaves the X.Y.Z section alone does not block the release; one that changes the section leaves
+   no release commit until the version is prepared again (below). Reverting the merge of a version
+   prepared again brings back the release commit before it, with that commit's CI result. The commit the event happened to point at is never used: a later commit would be
    tagged with changes no changelog section lists (and the next release starts from the tag), and
    a documentation-only push runs the static checks only. The release commit is published once the
    newest CI run of its push to `main` passed every job (`Choose tiers`, `Static checks`,
    `Unit tests`, `Web UI`, `Image`, `Integration suite`, `Deploy suite`, `Kind`, `CI`; a skipped
    job does not count). Until then a CI-triggered run waits (a notice); a manual run fails with the
-   reason.
+   reason. Nothing is released either while the environment `release` does not exist or has no
+   required reviewer (see Repository settings): the run reports the release as blocked.
 4. **Approve the release.** The `plan` job's notice names the tag, the release commit and its pull
    request (`releasing vX.Y.Z from <sha> (pull request #N)`). Check them, then approve the `image`
    job in the run's *Review deployments* dialog; after the image is built, approve the `publish`
@@ -95,8 +97,8 @@ no section, and that run fails with nothing to commit (#284).
 
 **No commit is the release commit.** The release workflow reports the release as blocked with
 `none of the N commits since … is the merge of this repository's release/next pull request`. This
-happens when `CHANGELOG.md` gained the X.Y.Z section some other way, when a later commit changed
-that section, or when the release pull request's merge was reverted. Prepare the version again:
+happens when `CHANGELOG.md` gained the X.Y.Z section some other way (with `Chart.yaml` at X.Y.Z),
+or when a later commit changed that section. Prepare the version again:
 run the **Release PR** workflow manually with `version` set to the pending version and merge its
 pull request. Right after a merge, GitHub can take a moment to link the pull request to its commit;
 if the workflow ran in that window, re-run it.
@@ -138,7 +140,7 @@ breaking change) with a type from the table above. Reword offending commits
 
 | Setting | Why |
 |---------|-----|
-| Environment `release` (Settings → Environments → New environment) | The `image` and `publish` jobs run in it. Add yourself as a *Required reviewer*, leave *Prevent self-review* off (you start the runs you approve, through your merge), and under *Deployment branches and tags* choose *Selected branches and tags* with the branch `main`. **Create it before the first release:** GitHub creates a missing environment on first use with no protection, and those jobs then run without asking. |
+| Environment `release` (Settings → Environments → New environment) | The `image` and `publish` jobs run in it. Add yourself as a *Required reviewer*, leave *Prevent self-review* off (you start the runs you approve, through your merge), and under *Deployment branches and tags* choose *Selected branches and tags* with the branch `main`. GitHub creates a missing environment on first use with no protection, so the `plan` job reads the environment first (`GET /repos/{repo}/environments/release`, with its `actions: read` token) and reports the release as blocked until the environment exists with a required reviewer. |
 | Settings → Actions → General → *Allow GitHub Actions to create and approve pull requests* | `release-pr.yml` opens the pull request with the workflow token. Required unless `RELEASE_TOKEN` is set; without either, the run fails with an error that names this setting. |
 | Label `release` | Put on the release pull request (`gh label create release`). When it is missing the pull request is opened without it and the run warns. |
 | Secret `RELEASE_TOKEN` (optional) | Pull requests opened with `GITHUB_TOKEN` do not start CI. A fine-grained token or GitHub App token with *contents* and *pull requests* write on this repository makes CI run on the release pull request. Without it, close and reopen the pull request (or push to it) to start CI. |
