@@ -7,6 +7,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/juliosaraiva/patrol-cd/api/v1alpha1"
@@ -43,8 +44,8 @@ func (r *Reconciler) OnClusterCacheCreated(clusterKey string, cc cache.ClusterCa
 //     from one Application to another refreshes both. Core Endpoints count for none.
 //  3. An Application whose root (managed) resource changed is compared at level recent (logged
 //     at info); one whose descendant changed gets a tree-only refresh (logged at debug). The
-//     changed Application object itself and Applications outside the allowed namespaces are
-//     skipped.
+//     changed Application object itself, Applications outside the allowed namespaces and
+//     tracking values no Application can have are skipped (isApplicationKey).
 //  4. A namespaced object attributed to no Application refreshes the tree of the Applications
 //     that monitor orphaned resources in its namespace on this cluster (refreshOrphanMonitors).
 //
@@ -90,11 +91,20 @@ func (r *Reconciler) onResourceUpdated(clusterKey string, newRes, oldRes *cache.
 	for inst, root := range apps {
 		name, namespace := tracking.ParseInstanceName(inst, r.cfg.Namespace)
 		key := types.NamespacedName{Namespace: namespace, Name: name}
-		if !r.cfg.Namespaces().Allowed(namespace) || r.isSelf(ctx, changed, key) {
+		if !isApplicationKey(key) || !r.cfg.Namespaces().Allowed(namespace) || r.isSelf(ctx, changed, key) {
 			continue
 		}
 		r.requestLiveRefresh(ctx, key, root, clusterKey, ref)
 	}
+}
+
+// isApplicationKey reports whether an Application can have this namespace and name. The tracking
+// metadata of a live object can hold any string, and a value that is no Application's name has
+// nothing to refresh.
+func isApplicationKey(key types.NamespacedName) bool {
+	// The lengths come first: the validators scan the whole value, however long it is.
+	return len(key.Namespace) <= validation.DNS1123LabelMaxLength && len(key.Name) <= validation.DNS1123SubdomainMaxLength &&
+		len(validation.IsDNS1123Label(key.Namespace)) == 0 && len(validation.IsDNS1123Subdomain(key.Name)) == 0
 }
 
 // ApplicationExists returns the compare.Deps.ApplicationExists of a controller: whether the

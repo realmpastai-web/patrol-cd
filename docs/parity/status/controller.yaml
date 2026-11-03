@@ -210,6 +210,7 @@ APP-085:
   impl: [internal/controller/app/liveevents.go, internal/controller/app/reconciler.go]
   tests:
     - internal/controller/app/liveevents_test.go:TestOnResourceUpdated
+    - internal/controller/app/liveevents_test.go:TestOnResourceUpdatedInstanceNames
     - internal/controller/app/liveevents_test.go:TestRefreshOrphanMonitors
     - internal/controller/app/reconciler_test.go:TestIndexKeys
     - internal/controller/integration/autosync_test.go:TestSelfHeal
@@ -226,7 +227,10 @@ APP-085:
     comparison stays Missing until the next one), found through in-memory field indexes (Applications by
     destination namespace, AppProjects with spec.orphanedResources); Applications outside the
     allowed namespaces or of other shards are skipped. Upstream matches orphan monitors by
-    namespace on any cluster; Patrol also matches the event's cluster.
+    namespace on any cluster; Patrol also matches the event's cluster. Upstream looks each
+    tracking value up in the Application informer and skips one with no Application before it
+    logs or refreshes; Patrol skips values that cannot be a namespace and an Application name, and
+    queues and logs the rest, which Reconcile drops as NotFound.
 
 APP-110:
   status: implemented
