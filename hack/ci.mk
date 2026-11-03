@@ -13,6 +13,10 @@
 #   make ci-deploy       test/deploy: chart and manifests against envtest (job "deploy")
 #   make ci-ui           pnpm install, API types check, typecheck, lint, vitest, build (job "ui")
 #   make ci-image        build the image and run the layout, smoke and rootfs checks (job "image")
+#   make ci-flake-unit   ci-unit under -race with -count=$(CI_FLAKE_COUNT) -shuffle=on (scheduled.yml, "flake-unit")
+#   make ci-flake-integration  ci-integration twice, -shuffle=on (scheduled.yml, "flake-integration")
+#   make ci-flake-ui     vitest with --sequence.shuffle and a recorded seed (scheduled.yml, "flake-ui")
+#   make ci-flake-seeds  collect the shuffle seeds, rapid seeds and new rapid fail files of the runs above
 #
 # The kind job runs the existing kind-* targets one per step (docs/guides/local-development.md).
 # Tool versions: `hack/ci/install-tools.sh` (hack/ci/tools.lock), `make tools` (tools/go.mod), Go from
@@ -211,3 +215,41 @@ ci-image: ## Pin checks, BuildKit checks, image build, layout and smoke checks, 
 	$(MAKE) --no-print-directory image-layout-check
 	$(MAKE) --no-print-directory image-smoke
 	umask 022 && $(MAKE) --no-print-directory image-rootfs-check
+
+# The flake hunt of .github/workflows/scheduled.yml (docs/guides/ci.md, #110). The same suites as the
+# unit and integration jobs, with the same reports and rules, but every test runs several times in a
+# shuffled order: the timing and order bugs that otherwise reach main one at a time. go test's -timeout
+# bounds a whole test binary, so it grows with the count; so does the wall-clock bound. The shuffle seed
+# of each package is in the -json stream (`-test.shuffle N`); ci-flake-seeds lists it.
+CI_FLAKE_COUNT ?= 3
+CI_FLAKE_INTEGRATION_COUNT ?= 2
+# Simply expanded, so that the seed printed and the seed used are the same.
+ifeq ($(origin CI_FLAKE_UI_SEED),undefined)
+CI_FLAKE_UI_SEED := $(shell date +%s)
+endif
+
+.PHONY: ci-flake-unit
+ci-flake-unit: CI_GO_TEST_FLAGS = -race -count=$(CI_FLAKE_COUNT) -shuffle=on -p 1 -json
+ci-flake-unit: CI_UNIT_TIMEOUT = $(shell expr 30 \* $(CI_FLAKE_COUNT))m
+ci-flake-unit: CI_UNIT_WALL = $(shell expr 35 \* $(CI_FLAKE_COUNT) + 20)m
+ci-flake-unit: ci-unit ## ci-unit under -race, each test CI_FLAKE_COUNT (3) times in a shuffled order.
+
+.PHONY: ci-flake-integration
+ci-flake-integration: CI_GO_TEST_FLAGS = -race -count=$(CI_FLAKE_INTEGRATION_COUNT) -shuffle=on -p 1 -json
+ci-flake-integration: CI_INTEGRATION_TIMEOUT = $(shell expr 60 \* $(CI_FLAKE_INTEGRATION_COUNT))m
+ci-flake-integration: CI_INTEGRATION_WALL = $(shell expr 75 \* $(CI_FLAKE_INTEGRATION_COUNT))m
+ci-flake-integration: ci-integration ## ci-integration under -race, CI_FLAKE_INTEGRATION_COUNT (2) times, shuffled.
+
+# vitest's shuffle is known to fail on pre-existing order dependencies
+# (docs/verification/runs/2026-10-16-ui-flake.md); the seed is printed so that a failure reproduces with
+# `pnpm -C ui exec vitest run --sequence.shuffle --sequence.seed=SEED`.
+.PHONY: ci-flake-ui
+ci-flake-ui: ## vitest with --sequence.shuffle (seed CI_FLAKE_UI_SEED, default the current time), CI=true.
+	@echo "==> ci-flake-ui (vitest seed $(CI_FLAKE_UI_SEED))"
+	@mkdir -p $(CI_OUT) && echo "vitest --sequence.seed=$(CI_FLAKE_UI_SEED)" >$(CI_OUT)/ui-shuffle-seed.txt
+	pnpm -C $(UI_DIR) install --frozen-lockfile
+	CI=true pnpm -C $(UI_DIR) exec vitest run --sequence.shuffle --sequence.seed=$(CI_FLAKE_UI_SEED)
+
+.PHONY: ci-flake-seeds
+ci-flake-seeds: ## Write $(CI_OUT)/seeds.md (shuffle and rapid seeds) and copy new rapid fail files to $(CI_OUT)/rapid.
+	bash hack/ci/flake-seeds.sh $(CI_OUT)
