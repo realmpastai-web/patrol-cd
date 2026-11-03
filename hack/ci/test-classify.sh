@@ -128,5 +128,7 @@ want "manual run, full"             "$FULL" workflow_dispatch '[]' '' true inter
 want "manual run, default"          "$FULL" workflow_dispatch '[]' '' '' internal/x/x.go
 want "manual run, not full"         "$CODE" workflow_dispatch '[]' '' false internal/x/x.go
 
+want "scheduled run"                "$FULL" schedule '[]' '' '' internal/x/x.go
+want "scheduled run, docs only"     "$FULL" schedule '[]' '' '' docs/guide.md
 printf '\ntest-classify: %d passed, %d failed\n' "$passed" "$failed"
 [[ $failed -eq 0 ]]
