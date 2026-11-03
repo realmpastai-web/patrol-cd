@@ -36,8 +36,8 @@ does not block.
 
 ## Tiers and triggers
 
-The workflow runs on pushes to `main`, on pull requests (opened, updated, reopened) and on manual
-dispatch. Draft pull requests are tested like any other, and marking one ready for review does not
+The workflow runs on pushes to `main`, on pull requests (opened, updated, reopened), on manual
+dispatch, and once a week as the drift check of the [scheduled run](#scheduled-run), which calls it. Draft pull requests are tested like any other, and marking one ready for review does not
 start a second run on the same commit. What runs depends on the change
 (`hack/ci/classify-changes.sh`), because the Go suites are slow on a 2 vCPU runner and every full run
 adds about 4 GB to the 10 GB Actions cache. (The tiers were designed when the repository was private
@@ -48,7 +48,7 @@ and had 2,000 Actions minutes a month; standard runners cost nothing for a publi
 | docs only | `static` | every changed file is documentation: `docs/`, `*.md` at the repository root, `.gitignore` (pushes and pull requests alike; a README in a subdirectory counts as a change to that directory; `LICENSE` and `NOTICE` do not count, the image build copies them, and neither does `CHANGELOG.md`: a push that changes only it is a release commit, which the release workflow publishes only after the full tier passed) |
 | code | `static`, `unit` (without `-race`), `ui`, `image` | any other pull request, push or manual run (a manual run with `full` false runs only this tier) |
 | kind | adds the image hand-over and `kind` | push to `main`, manual run with `full` true (the default), label `ci:kind` or `ci:full`, or a pull request that touches `hack/kind/`, `hack/images/`, `test/e2e/`, `deploy/`, the Dockerfile, `.dockerignore`, the Makefiles, or the CI files the job runs (`hack/ci/{install-tools.sh,tools.lock,preflight.sh,free-disk.sh,sample-resources.sh,kind-diagnostics.sh,classify-changes.sh}`; the workflow, the setup action and the other helpers reach it through the full tier or not at all) |
-| full | adds `-race` to `unit`, and `integration`, `deploy` (and the kind tier) | push to `main`, manual run with `full` true, label `ci:full`, or a pull request that touches `deploy/`, `test/deploy/`, `test/integration/`, `go.mod`, `go.sum`, `tools/`, `hack/ci/tools.lock`, the Makefiles, `.github/workflows/ci.yml`, `.github/actions/` (the setup action every Go job uses), `hack/ci/testreport/` or the two lists `hack/ci/must-run.txt` and `hack/ci/allowed-skips.txt` |
+| full | adds `-race` to `unit`, and `integration`, `deploy` (and the kind tier) | push to `main`, manual run with `full` true, the weekly scheduled run, label `ci:full`, or a pull request that touches `deploy/`, `test/deploy/`, `test/integration/`, `go.mod`, `go.sum`, `tools/`, `hack/ci/tools.lock`, the Makefiles, `.github/workflows/ci.yml`, `.github/actions/` (the setup action every Go job uses), `hack/ci/testreport/` or the two lists `hack/ci/must-run.txt` and `hack/ci/allowed-skips.txt` |
 
 Documentation-only changes never reach the kind and full tiers, whatever labels the pull request
 has. Set the repository variable `CI_HEAVY_ON_PR` to `true` to run the full tier on every pull
@@ -183,6 +183,57 @@ make image kind-up kind-fixtures kind-smoke kind-install kind-verify VERIFY_FLAG
 `make ci-unit` and the suites write `dist/ci/*.json` (the `go test -json` stream), a Markdown
 summary and a JSON report; `PATROL_WAIT_SCALE=3` gives the kind scripts the CI timings.
 
+## Scheduled run
+
+`.github/workflows/scheduled.yml` (#110) runs on Sundays at 03:17 UTC and by hand (`gh workflow run
+scheduled.yml`, inputs `count` 1-8, default 3, and `drift`, default true). GitHub runs schedules only from
+the default branch, and turns a schedule off after 60 days without activity in the repository.
+
+| Job | What it runs | Make target |
+|-----|--------------|-------------|
+| `drift` | `ci.yml` itself, called with `full: true` (`classify-changes.sh` selects the full tier and the kind job for the `schedule` event): an external dependency that broke shows on Sunday instead of on the next code change | the `ci.yml` jobs |
+| `flake-unit` | the unit suite under `-race`, every test `count` times, `-shuffle=on` | `ci-flake-unit CI_FLAKE_COUNT=N` |
+| `flake-integration` | `test/integration` under `-race`, twice, `-shuffle=on` | `ci-flake-integration` |
+| `flake-ui` | vitest with `--sequence.shuffle` and a recorded seed; never fails the run (below) | `ci-flake-ui` |
+| `report` | when `drift`, `flake-unit` or `flake-integration` failed: opens the issue "Scheduled CI run failed" (labels `kind/ci`, `area/ci`), or comments on it when one is open; it lists each job's result and the failed Go tests | |
+
+The flake jobs use the same `go test -json` stream, test report, skip and must-run rules as the unit and
+integration jobs; `-timeout` and the wall-clock bound grow with the count (`hack/ci.mk`). On failure they
+upload the report, the compressed event stream, `go test`'s stderr, the integration logs and `seeds.md`
+(`make ci-flake-seeds`, `hack/ci/flake-seeds.sh`): the `-test.shuffle` seed of every package, rapid's
+`-rapid.failfile=... (or -rapid.seed=N)` lines, and the new rapid fail files under `rapid/` with their
+paths, so the artifact can be unpacked over a checkout. Reproduce with `go test -race -shuffle=SEED -run
+TEST ./pkg` or `-rapid.failfile=...`. Each new failure becomes a CI-F finding in
+[phase4-findings](../verification/phase4-findings.md); the issue is closed when a scheduled run passes.
+
+vitest's shuffle already fails on order dependencies recorded on 2026-10-16
+([runs/2026-10-16-ui-flake.md](../verification/runs/2026-10-16-ui-flake.md); the fixes are deferred), so
+`flake-ui` runs with `continue-on-error`: its outcome and seed go to the step summary and the issue, not to
+the run's status. Make it fail the run once those tests are fixed.
+
+What `drift` does not cover: it restores `main`'s caches, so the Go module, `make tools` and envtest
+downloads (cached by `go.sum`, `tools/go.sum` and the `Makefile`) are re-fetched only when those files
+change. The pinned tool downloads (`install-tools.sh`), the base and fixture images, kind's node image,
+the runner image and its packages are fetched on every run.
+
+**Minutes.** Estimated from the last eight pushes to `main` before this change (CI runs 41456890518 to
+41588270893, 2026-11-02 to 2026-11-03, job and step durations from the Actions API):
+
+| Job | Basis | Estimate |
+|-----|-------|----------|
+| `drift` | full tier: 53.3 to 74.6 job minutes a run, median 58.7 | about 59 |
+| `flake-unit`, `count` 3 | "Go tests" step 15.6 to 24.7 minutes, median 18.2; the rest of the job without the kind script tests about 1.2 | 3 × 18.2 + 1.2 = about 56 (48 to 75); each extra count adds about 18 |
+| `flake-integration` | "Integration suite (-race)" step 11.9 to 14.1 minutes, median 12.1; the rest about 0.7 | 2 × 12.1 + 0.7 = about 25 |
+| `flake-ui` | the whole Web UI job (install, typecheck, lint, vitest, build) 1.6 to 2.7 minutes | at most 3 |
+| `report` | only on failure, one `gh` call | under 1 |
+
+About 144 job minutes a run (about 130 to 180), about 620 a month at 4.3 runs. The repeated runs are
+counted as full test runs, but compiling is part of each step and is not repeated by `-count`, so the
+flake estimates lean high. On the Free plan's 2,000 minutes for a private repository that would be about
+31 % of the month before any push or pull request; for this public repository standard GitHub-hosted
+runners are not billed. The jobs run in parallel, so a run takes about an hour (`flake-unit`). The
+scheduled workflow itself has not run on GitHub yet: these are estimates, not measurements.
+
 ## When a job fails
 
 - **`helm`/`kustomize` version errors**: the runner's own tools came first on `PATH`. The
@@ -211,5 +262,4 @@ summary and a JSON report; `PATROL_WAIT_SCALE=3` gives the kind scripts the CI t
 ## Not covered yet
 
 Playwright specs, a multi-architecture or arm64 image build in CI (the release workflow builds
-both, [releasing.md](releasing.md)), vulnerability scans (#106), required checks (#25), and a scheduled
-run that would catch drift of external dependencies (Docker Hub images, tool downloads).
+both, [releasing.md](releasing.md)), vulnerability scans (#106) and required checks (#25).
