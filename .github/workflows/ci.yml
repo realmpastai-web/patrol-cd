@@ -352,15 +352,17 @@ jobs:
     needs: [changes, image]
     if: needs.changes.outputs.kind == 'true'
     runs-on: ubuntu-24.04
-    # The step timeouts below add up to about 185 minutes in the worst case, diagnostics included;
+    # The step timeouts below add up to about 250 minutes in the worst case, diagnostics included;
     # the job limit is above them so that a hang ends as a failed step (which still runs the
     # diagnostics) and not as a cancelled job (which skips every later step). A normal run takes a
     # fraction of this. A step's timeout must cover the waits its script can run one after the other
     # at PATROL_WAIT_SCALE=3, soft ones included, so that the script reports the failure: kind-up
     # (kind --wait 9 minutes, then the node wait 9 minutes), kind-fixtures (the 15 minute wait for the
     # seed Job after the image builds), kind-smoke (two pull checks of 6 minutes each), kind-install
-    # (helm --timeout 18 minutes).
-    timeout-minutes: 190
+    # (helm --timeout 18 minutes), kind-restore-drill (controllers stopped 4.5, namespace deleted 9,
+    # helm --timeout 18, server and default project 9, login 1.5, Applications 18, the repository
+    # check 1.5 minutes).
+    timeout-minutes: 255
     permissions:
       contents: read
     env:
@@ -414,6 +416,11 @@ jobs:
       - name: Verify the installation (with lifecycle)
         timeout-minutes: 30
         run: make kind-verify VERIFY_FLAGS=--lifecycle 2>&1 | tee dist/ci/verify-install.log
+      # The backup it takes holds Secrets; it stays in a temporary directory the script removes and
+      # never reaches the log or dist/ci.
+      - name: Restore drill (export, namespace deleted, reinstall, import)
+        timeout-minutes: 65
+        run: make kind-restore-drill 2>&1 | tee dist/ci/restore-drill.log
       - name: Summary
         if: always()
         run: |
@@ -428,6 +435,13 @@ jobs:
               echo '```'
             else
               echo "verify-install did not run."
+            fi
+            if [[ -f dist/ci/restore-drill.log ]]; then
+              echo '```'
+              grep -E '^(FAIL|restore-drill:)' dist/ci/restore-drill.log || true
+              echo '```'
+            else
+              echo "restore-drill did not run."
             fi
           } >>"$GITHUB_STEP_SUMMARY"
       # The bundle is collected outside the upload path and moved there only when the secret scrub
@@ -456,6 +470,7 @@ jobs:
           name: kind-record-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/ci/verify-install.log
+            dist/ci/restore-drill.log
             dist/ci/resources.tsv
           if-no-files-found: ignore
           retention-days: 30

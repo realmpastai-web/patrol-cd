@@ -382,6 +382,24 @@ OPS-143:
     refused stays on the Secret it reads. An import gives an object the owners the backup names, which upstream's update does not,
     and keeps the others, because two Cluster objects can own one Secret here.
 
+OPS-144:
+  status: verified
+  impl: [docs/guides/backup-restore.md, internal/cli/admin/export.go, internal/cli/admin/import.go]
+  tests:
+    - hack/kind/restore-drill.sh --new-cluster (make kind-restore-drill RESTORE_DRILL_FLAGS=--new-cluster; the control-plane kind cluster deleted and created again, the same chart version installed with the saved values, the backup imported with the installed image's CLI; the 7 fixture Applications Synced/Healthy with no Operation, the restored admin password and private Helm repository credential working, the workloads on patrol-target unchanged)
+    - hack/kind/restore-drill.sh (make kind-restore-drill; the same after the Patrol namespace is deleted with the controllers stopped and the finalizers removed; a step of the CI kind job)
+    - test/e2e/fixtures/test-scripts.sh (the drill's checks before the deletion, on envtest; simulated)
+  evidence: docs/verification/log.md#V-0074; docs/verification/log.md#V-0073; docs/verification/runs/2026-11-03-restore-drill.md
+  notes: >-
+    The drill installs the Helm chart's default profile on kind, with Applications in the
+    installation's namespace and no ApplicationSets. Documented but not drilled: the static
+    manifests, the namespace-scoped and core variants, HA, Applications and ApplicationSets in
+    other namespaces, ApplicationSets at all, project-role tokens, SSO, and a restore into another
+    namespace, release name or chart version. The edge case
+    differs from upstream's page: Patrol's export fails in a namespace without an installation
+    (TestExportRequiresSettingsConfigMaps), and the silent case is import, which exits 0 there
+    (#287). A backup carries no version, so the pinning is the guide's procedure.
+
 NOTIF-104:
   status: verified
   impl: [internal/cli/admin/notifications.go]

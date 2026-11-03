@@ -13,6 +13,9 @@
 #     Secret + Cluster in the control plane; the stored token authenticates against the target
 #     with TLS verified by the stored caData);
 #   - test/e2e/fixtures/patrol/register.sh (credential copies, Repository/Application objects);
+#   - the checks hack/kind/restore-drill.sh runs before it deletes the namespace (finalizers left,
+#     Operations in progress, controller pods, failures of the API server, the objects recorded on
+#     patrol-target, the objects of a backup), taken from the script;
 #   - hack/kind/env.sh.
 # The envtest servers stand in for the kind clusters, so this is labelled "simulated" in
 # docs/verification; the real environment is checked by test/e2e/fixtures/smoke.sh.
@@ -444,6 +447,198 @@ for want in e2e-git-http-creds:repo-creds e2e-git-ssh-creds:repo-creds e2e-chart
 	C -n patrol-system get secret "${want%%:*}" -o go-template='{{index .metadata.labels "cd.patrol.example/secret-type"}}' >"$SIM/label"
 	expect ok "Secret ${want%%:*} is labeled secret-type=${want##*:}" -- grep -x "${want##*:}" "$SIM/label"
 done
+
+echo "== restore-drill.sh checks before the namespace deletion"
+# The functions are taken from restore-drill.sh itself (the script needs the live clusters) and run
+# against namespace patrol-drill of the control envtest and the e2e-* namespaces of the target one.
+sed -n -e '/^patrol_kinds=/p' -e '/^listing() {$/,/^}$/p' -e '/^finalizers_left() {$/,/^}$/p' \
+	-e '/^strip_finalizers() {$/,/^}$/p' -e '/^active_operations() {$/,/^}$/p' -e '/^controller_pods() {$/,/^}$/p' \
+	-e '/^target_state() {$/,/^}$/p' -e '/^backup_names() /p' \
+	"$ROOT/hack/kind/restore-drill.sh" >"$SIM/drill.sh"
+drill_helpers_found() {
+	cat "$SIM/drill.sh"
+	bash -c 'source "$1" && declare -F listing finalizers_left strip_finalizers active_operations controller_pods target_state backup_names' _ "$SIM/drill.sh"
+}
+# drill FUNCTION ARGS...: runs a function of the drill with its k and kt wrappers. While
+# drill_api_down is 1, k fails as kubectl does when the API server does not answer.
+drill_api_down=0
+drill() {
+	bash -c '
+		set -uo pipefail
+		source "$1/hack/kind/lib.sh"
+		source "$2"
+		work=$3
+		k() { patrol::kubectl patrol-control -n patrol-drill "$@"; }
+		if [[ $4 == 1 ]]; then
+			k() {
+				echo "the server was unable to return a response in the time allotted" >&2
+				return 1
+			}
+		fi
+		kt() { patrol::kubectl patrol-target "$@"; }
+		shift 4
+		"$@"
+	' _ "$ROOT" "$SIM/drill.sh" "$SIM" "$drill_api_down" "$@"
+}
+# drill_prints WANT FUNCTION: FUNCTION succeeds and prints exactly WANT (lines joined by spaces).
+drill_prints() {
+	local want=$1 got
+	shift
+	got=$(drill "$@" | tr '\n' ' ') || return 1
+	echo "printed: '$got'"
+	[[ $got == "$want" ]]
+}
+# drill_down FUNCTION and down_prints WANT FUNCTION: the same with the API server down.
+drill_down() {
+	local drill_api_down=1
+	drill "$@"
+}
+down_prints() {
+	local drill_api_down=1
+	drill_prints "$@"
+}
+C create namespace patrol-drill >/dev/null
+# Every kind in patrol_kinds carries a finalizer; strip_finalizers may only remove those of the
+# Applications, ApplicationSets and AppProjects.
+cat <<'EOF' | C -n patrol-drill create -f - >/dev/null
+apiVersion: cd.patrol.example/v1alpha1
+kind: Application
+metadata: {name: kept, finalizers: [resources-finalizer.cd.patrol.example]}
+spec:
+  project: default
+  source: {repoURL: http://git.example/r.git, path: .}
+  destination: {name: patrol-target, namespace: x}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: Application
+metadata: {name: plain}
+spec:
+  project: default
+  source: {repoURL: http://git.example/r.git, path: .}
+  destination: {name: patrol-target, namespace: x}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: ApplicationSet
+metadata: {name: set, finalizers: [resources-finalizer.cd.patrol.example]}
+spec:
+  generators: [{list: {elements: []}}]
+  template:
+    metadata: {name: x}
+    spec:
+      project: default
+      source: {repoURL: http://git.example/r.git, path: .}
+      destination: {name: patrol-target, namespace: x}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: AppProject
+metadata: {name: proj, finalizers: [resources-finalizer.cd.patrol.example]}
+spec: {}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: Operation
+metadata: {name: running, finalizers: [example.com/hold]}
+spec: {application: kept, sync: {}}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: Operation
+metadata: {name: unstarted}
+spec: {application: plain, sync: {}}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: Cluster
+metadata: {name: c, finalizers: [example.com/hold]}
+spec: {name: c, server: https://c.example}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: Repository
+metadata: {name: r, finalizers: [example.com/hold]}
+spec: {url: http://git.example/r.git}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: RepositoryCredential
+metadata: {name: rc, finalizers: [example.com/hold]}
+spec: {urlPrefix: http://git.example/}
+---
+apiVersion: cd.patrol.example/v1alpha1
+kind: SCMProvider
+metadata: {name: s, finalizers: [example.com/hold]}
+spec: {type: github}
+EOF
+C -n patrol-drill patch operations.cd.patrol.example running --subresource=status --type=merge -p '{"status":{"phase":"Running"}}' >/dev/null
+# One Operation in every other phase of the CRD's enum, named after it.
+for phase in Pending Terminating Succeeded Failed Error Cancelled Rejected; do
+	op=$(tr '[:upper:]' '[:lower:]' <<<"$phase")
+	printf 'apiVersion: cd.patrol.example/v1alpha1\nkind: Operation\nmetadata: {name: %s}\nspec: {application: plain, sync: {}}\n' "$op" |
+		C -n patrol-drill create -f - >/dev/null
+	C -n patrol-drill patch operations.cd.patrol.example "$op" --subresource=status --type=merge -p "{\"status\":{\"phase\":\"$phase\"}}" >/dev/null
+done
+C -n patrol-drill create serviceaccount default >/dev/null
+for pod in patrol-controller-0:patrol-controller patrol-applicationset-controller-a:patrol-applicationset-controller \
+	patrol-server-a:patrol-server; do
+	C -n patrol-drill run "${pod%%:*}" --image=registry.example/patrol:1 --labels="app.kubernetes.io/name=${pod##*:}" >/dev/null
+done
+T create namespace e2e-drill >/dev/null
+T create namespace other-drill >/dev/null
+T -n e2e-drill create serviceaccount default >/dev/null
+T -n e2e-drill create service clusterip web --tcp=80:8080 >/dev/null
+T -n e2e-drill create deployment web --image=registry.example/web:1 >/dev/null
+cat <<'EOF' | T -n e2e-drill create -f - >/dev/null
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata: {name: web-1}
+spec:
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec: {containers: [{name: web, image: registry.example/web:1}]}
+EOF
+T -n e2e-drill run web-1-a --image=registry.example/web:1 >/dev/null
+T -n other-drill create service clusterip web --tcp=80:8080 >/dev/null
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: present}\n' >"$SIM/backup-present.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: present}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: absent}\n' >"$SIM/backup-absent.yaml"
+C -n patrol-drill create configmap present >/dev/null
+expect ok "listing, finalizers_left, strip_finalizers, active_operations, controller_pods, target_state, backup_names found" -- drill_helpers_found
+held='["example.com/hold"]'
+rf='["resources-finalizer.cd.patrol.example"]'
+expect ok "finalizers_left lists an object of every kind in patrol_kinds" -- \
+	drill_prints "Application/kept $rf ApplicationSet/set $rf AppProject/proj $rf Operation/running $held Cluster/c $held Repository/r $held RepositoryCredential/rc $held SCMProvider/s $held " finalizers_left
+expect ok "active_operations lists the Pending, Running, Terminating and phaseless Operations only" -- \
+	drill_prints 'pending Pending running Running terminating Terminating unstarted  ' active_operations
+expect ok "controller_pods lists the application and ApplicationSet controller pods only" -- \
+	drill_prints 'pod/patrol-applicationset-controller-a pod/patrol-controller-0 ' controller_pods
+expect ok "strip_finalizers" -- drill strip_finalizers
+# The drill stops when anything is left: strip_finalizers leaves the other kinds alone.
+expect ok "after strip_finalizers only the finalizers of the other kinds are left" -- \
+	drill_prints "Operation/running $held Cluster/c $held Repository/r $held RepositoryCredential/rc $held SCMProvider/s $held " finalizers_left
+for o in operations/running clusters/c repositories/r repositorycredentials/rc scmproviders/s; do
+	C -n patrol-drill patch "${o%%/*}.cd.patrol.example" "${o##*/}" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null
+done
+expect ok "finalizers_left prints nothing once none is left" -- drill_prints '' finalizers_left
+# The drill's checks compare listing's output with "": a list that cannot be read must not pass.
+expect ok "listing joins the lines a command prints" -- drill_prints 'a b' listing printf 'a\nb\n'
+expect ok "listing prints nothing for an empty list" -- drill_prints '' listing true
+for f in finalizers_left strip_finalizers active_operations controller_pods; do
+	expect fail "$f fails when the API server does not answer" -- drill_down "$f"
+done
+expect ok "listing reports the error when the API server does not answer" -- \
+	down_prints 'error: the server was unable to return a response in the time allotted ' listing finalizers_left
+# target_state must print the UID and the generation (empty for kinds without one) of each object.
+uid() { T -n e2e-drill get "$@" -o jsonpath='{.metadata.uid}'; }
+{
+	echo "Deployment e2e-drill/web $(uid deployment web) 1"
+	echo "Namespace /e2e-drill $(T get namespace e2e-drill -o jsonpath='{.metadata.uid}') "
+	echo "Pod e2e-drill/web-1-a $(uid pod web-1-a) $(T -n e2e-drill get pod web-1-a -o jsonpath='{.metadata.generation}')"
+	echo "ReplicaSet e2e-drill/web-1 $(uid replicaset web-1) 1"
+	echo "Service e2e-drill/web $(uid service web) "
+} >"$SIM/target-want"
+target_lists() {
+	drill target_state >"$SIM/target-got" || return 1
+	diff "$SIM/target-want" "$SIM/target-got"
+}
+expect ok "target_state lists the e2e-* Namespace, Deployment, ReplicaSet, Pod and Service with UID and generation, nothing else" -- \
+	target_lists
+expect ok "backup_names prints the objects of a backup" -- drill_prints 'configmap/present ' backup_names "$SIM/backup-present.yaml"
+expect fail "backup_names fails when an object of the backup is missing" -- drill backup_names "$SIM/backup-absent.yaml"
 
 echo "== env.sh"
 expect ok "env.sh output evaluates" -- bash -c "eval \"\$('$ROOT/hack/kind/env.sh' 2>/dev/null)\" && test \"\$PATROL_TARGET_INTERNAL_SERVER\" = https://patrol-target-control-plane:6443 && echo \"\$PATROL_CONTROL_KUBECONFIG\""

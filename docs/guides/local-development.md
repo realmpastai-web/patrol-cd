@@ -65,7 +65,7 @@ make kind-up        # = hack/kind/up.sh
 Override the node or registry image with `PATROL_KIND_NODE_IMAGE` / `PATROL_REGISTRY_IMAGE`.
 
 Other targets in `hack/kind/kind.mk`: `kind-down`, `kind-load`, `kind-status`, `kind-fixtures`,
-`kind-install`, `kind-smoke` and `kind-verify`.
+`kind-install`, `kind-smoke`, `kind-verify` and `kind-restore-drill`.
 
 ## Install Patrol CD and verify it
 
@@ -77,7 +77,14 @@ make kind-up kind-fixtures    # clusters, registry, git server, chart repository
 make kind-install             # load the image, helm install, register patrol-target and the fixtures
 make kind-verify              # 42 checks against the live clusters
 make kind-verify VERIFY_FLAGS=--lifecycle   # 58 checks: also rollback, password change, uninstall, re-install
+make kind-restore-drill       # 59 checks: export, delete the namespace, install again, import
+RESTORE_DRILL_FLAGS=--new-cluster make kind-restore-drill   # the same, deleting and recreating patrol-control
 ```
+
+`hack/kind/restore-drill.sh` runs the procedure of [backup-restore.md](backup-restore.md) and
+checks the restored installation (see the guide's status paragraph). It needs the state
+`kind-install kind-verify` leaves, and leaves the clusters in that state when it passes; when it
+fails after the loss, it prints the targets that rebuild the installation.
 
 `hack/kind/install.sh` loads the image into `patrol-control`, runs
 `helm upgrade --install patrol deploy/helm/patrol-cd` with `hack/kind/values.yaml` (the local

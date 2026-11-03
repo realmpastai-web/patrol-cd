@@ -27,7 +27,7 @@ the image to the kind job through the Actions cache, and the tool-location varia
 | `image` | offline pin checks, BuildKit checks, image build (linux/amd64), layout, smoke and rootfs checks | `ci-image` | code changes |
 | `integration` | `test/integration` (`PATROL_INTEGRATION=1`) | `ci-integration` | full tier |
 | `deploy` | `test/deploy`: the chart and the static manifests against envtest API servers, then a summary of what the Pod Security test covered (`hack/ci/podsecurity-evidence.sh`) | `ci-deploy` | full tier |
-| `kind` | three kind nodes and a registry: `kind-up`, `kind-fixtures`, `kind-smoke`, `kind-install`, `kind-verify VERIFY_FLAGS=--lifecycle` | the `kind-*` targets | kind tier |
+| `kind` | three kind nodes and a registry: `kind-up`, `kind-fixtures`, `kind-smoke`, `kind-install`, `kind-verify VERIFY_FLAGS=--lifecycle`, `kind-restore-drill` | the `kind-*` targets | kind tier |
 | `ci` | one status for the whole workflow (`hack/ci/gate.sh`) | | always |
 
 Playwright (`ui/e2e`) is not part of CI: the specs have never been run, and they need a running
@@ -64,7 +64,7 @@ other run, a push to `main` or a manual run, has a concurrency group of its own,
 cancelled or replaced.
 
 **Minutes.** The job timeouts bound the worst case, they are not an estimate: docs 5 + 60 + 5, code
-5 + 60 + 120 + 30 + 60 + 5 = 280, kind tier 280 + 190 = 470, full tier 280 + 100 + 75 + 190 = 645 (it
+5 + 60 + 120 + 30 + 60 + 5 = 280, kind tier 280 + 255 = 535, full tier 280 + 100 + 75 + 255 = 710 (it
 always includes kind). Measured on GitHub, full tier with the kind job, warm caches: about 66 job
 minutes a run (static 3, unit 24, web UI 4, image 6, integration 11, deploy 8, kind 10; each job is
 billed rounded up, about 72, when the repository was private); the first run, with cold caches, took about 104, and the first push to `main` (no cache of its own yet) 107
@@ -177,7 +177,7 @@ hack/ci/install-tools.sh --dest /tmp/ci-bin all && export PATH=/tmp/ci-bin/bin:$
 make ci-static                    # the secret scan reads the history of HEAD, then a copy of the files git does not ignore
 make ci-unit CI_RACE=0            # or CI_RACE=1; reports under dist/ci
 make ci-scripts ci-integration ci-deploy ci-ui ci-image
-make image kind-up kind-fixtures kind-smoke kind-install kind-verify VERIFY_FLAGS=--lifecycle
+make image kind-up kind-fixtures kind-smoke kind-install kind-verify VERIFY_FLAGS=--lifecycle kind-restore-drill
 ```
 
 `make ci-unit` and the suites write `dist/ci/*.json` (the `go test -json` stream), a Markdown

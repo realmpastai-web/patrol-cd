@@ -529,6 +529,8 @@ CAs to `configs.tlsCerts`, and narrow the egress values to your internal network
 
 ## Upgrades and rollback
 
+Take a backup first ([backup-restore.md](backup-restore.md)).
+
 ```bash
 helm upgrade patrol deploy/helm/patrol-cd -n patrol -f values.yaml --wait
 helm rollback patrol <revision> -n patrol --wait
@@ -560,6 +562,12 @@ helm rollback patrol <revision> -n patrol --wait
 ```bash
 helm uninstall patrol -n patrol
 ```
+
+To delete the namespace too while keeping what the Applications deployed (for example before a
+restore), follow
+[backup-restore.md](backup-restore.md#remove-a-damaged-installation-without-touching-workloads):
+an Application with a deletion finalizer deletes its resources when its namespace goes while a
+controller runs.
 
 Kept on purpose: the CRDs and the admission policy (`crds.keep`; deleting a CRD deletes every
 Application, project, cluster and repository of that kind) and two of the Secrets created at
