@@ -8,7 +8,8 @@
 #              the release commit): only the static job runs, for pushes and pull requests alike. A
 #              README in a subdirectory counts as a change to that directory (some are test fixtures).
 #   full       the expensive Go tier: unit tests under -race, the integration suite and the deploy
-#              suite. True for pushes to main, manual runs (input "full", default true), pull requests
+#              suite. True for pushes to main, manual runs (input "full", default true), the weekly
+#              scheduled run (.github/workflows/scheduled.yml calls ci.yml), pull requests
 #              with the label ci:full, pull requests that touch the files below those suites depend
 #              on, and every pull request when the repository variable CI_HEAVY_ON_PR is "true".
 #              Otherwise the unit job runs without -race and the other two do not run.
@@ -73,6 +74,9 @@ reason=none
 case $event in
 push)
 	full=true kind=true reason="push to ${BASE_REF_NAME:-main}"
+	;;
+schedule)
+	full=true kind=true reason="scheduled run (.github/workflows/scheduled.yml)"
 	;;
 workflow_dispatch)
 	if [[ ${DISPATCH_FULL:-true} != false ]]; then
