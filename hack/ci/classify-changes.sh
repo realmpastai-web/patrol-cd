@@ -4,9 +4,9 @@
 # explanation to the step summary.
 #
 #   docs_only  every changed file is documentation (docs/, *.md at the repository root, .gitignore;
-#              not LICENSE or NOTICE, which the image build copies): only the static job runs, for
-#              pushes and pull requests alike. A README in a subdirectory counts as a change to that
-#              directory (some are test fixtures).
+#              not LICENSE or NOTICE, which the image build copies, nor CHANGELOG.md, whose push is
+#              the release commit): only the static job runs, for pushes and pull requests alike. A
+#              README in a subdirectory counts as a change to that directory (some are test fixtures).
 #   full       the expensive Go tier: unit tests under -race, the integration suite and the deploy
 #              suite. True for pushes to main, manual runs (input "full", default true), pull requests
 #              with the label ci:full, pull requests that touch the files below those suites depend
@@ -59,7 +59,10 @@ docs_only=false
 touches_full=false
 touches_kind=false
 if [[ $all_changed -eq 0 ]]; then
-	if [[ -s $changed ]] && ! grep -qvE "$docs_re" "$changed"; then docs_only=true; fi
+	# CHANGELOG.md is not documentation: a release commit can change it alone (the first release,
+	# or a version prepared again), and the release workflow publishes it only after a push run of
+	# CI passed every job of the full tier.
+	if [[ -s $changed ]] && ! grep -qvE "$docs_re" "$changed" && ! grep -qxF CHANGELOG.md "$changed"; then docs_only=true; fi
 	if grep -qE "$full_re" "$changed"; then touches_full=true; fi
 	if grep -qE "$kind_re" "$changed"; then touches_kind=true; fi
 fi

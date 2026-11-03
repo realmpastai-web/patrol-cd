@@ -90,6 +90,7 @@ want "a README below the root is code" "$CODE" $PR '[]' '' '' internal/x/README.
 want "Go file"                      "$CODE" $PR '[]' '' '' internal/x/x.go
 want "LICENSE is not documentation" "$CODE" $PR '[]' '' '' LICENSE
 want "NOTICE is not documentation"  "$CODE" $PR '[]' '' '' NOTICE
+want "the changelog is not documentation" "$CODE" $PR '[]' '' '' CHANGELOG.md
 want "Dependabot configuration"     "$CODE" $PR '[]' '' '' .github/dependabot.yml
 want "the gate script"              "$CODE" $PR '[]' '' '' hack/ci/gate.sh
 want "label ci:kind"                "$KIND" $PR '["ci:kind"]' '' '' internal/x/x.go
@@ -121,6 +122,8 @@ want "a change mixing docs and the setup action" "$FULL" $PR '[]' '' '' docs/gui
 # Pushes and manual runs
 want "push to main"                 "$FULL" push '[]' '' '' internal/x/x.go
 want "docs-only push"               "$DOCS" push '[]' '' '' docs/guide.md
+want "a changelog-only push (a release commit)" "$FULL" push '[]' '' '' CHANGELOG.md
+want "a push of the changelog and docs" "$FULL" push '[]' '' '' CHANGELOG.md docs/guide.md
 want "manual run, full"             "$FULL" workflow_dispatch '[]' '' true internal/x/x.go
 want "manual run, default"          "$FULL" workflow_dispatch '[]' '' '' internal/x/x.go
 want "manual run, not full"         "$CODE" workflow_dispatch '[]' '' false internal/x/x.go

@@ -6,7 +6,8 @@
 # appVersion, and the chart README and static manifests are regenerated. The branch is rebuilt from
 # main on every run, so the pull request always describes main as it is; edits pushed to it by hand
 # are replaced by the next run. Merging it is the decision to release: release.yml tags and
-# publishes once CI has passed on the merged commit.
+# publishes once CI has passed on the merged commit and the owner approved its jobs. release.yml
+# accepts only the merge of this pull request (this repository's release/next, the title below).
 #
 # Nothing is proposed while a release is pending (merged, not yet tagged).
 #
@@ -95,8 +96,11 @@ jobs:
           git push --force origin "HEAD:refs/heads/$BRANCH"
           {
             echo "Merging this pull request releases **v$VERSION**: once CI passes on main, the release"
-            echo "workflow tags \`v$VERSION\`, pushes the image and the chart, and publishes the GitHub release."
+            echo "workflow tags \`v$VERSION\`, pushes the image and the chart, and publishes the GitHub release,"
+            echo "after the owner approves its image and publish jobs (environment \`release\`)."
             echo "This branch is rebuilt from main on every push; reword CHANGELOG.md here only right before merging."
+            echo "Merge it with a merge commit or a squash, and keep its title: the release workflow accepts only"
+            echo "this pull request's merge."
             echo
             echo "---"
             echo
