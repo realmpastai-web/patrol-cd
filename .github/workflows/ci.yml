@@ -7,7 +7,7 @@
 #   always         static
 #   code changes   unit (without -race), ui, image
 #   full           unit under -race, integration, deploy, and kind: pushes to main, manual runs,
-#                  pull requests with the label ci:full, pull requests that touch the chart, the
+#                  the weekly run of scheduled.yml (which calls this workflow), pull requests with the label ci:full, pull requests that touch the chart, the
 #                  deploy/integration suites, the modules, the pinned tools or the Makefiles, and every pull request
 #                  when the repository variable CI_HEAVY_ON_PR is "true"
 #   kind           the image is packaged and the kind job runs: also for pull requests with the
@@ -23,6 +23,15 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full tier (unit under -race, integration, deploy) and the kind job
+        type: boolean
+        default: true
+  # .github/workflows/scheduled.yml calls this workflow every week to catch drift of external
+  # dependencies (docs/guides/ci.md). github.event_name is then the caller's: schedule or
+  # workflow_dispatch.
+  workflow_call:
     inputs:
       full:
         description: Run the full tier (unit under -race, integration, deploy) and the kind job

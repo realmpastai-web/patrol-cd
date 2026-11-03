@@ -1,0 +1,296 @@
+# Scheduled CI (#110). Guide: docs/guides/ci.md, "Scheduled run". Once a week, and on manual runs:
+#   drift              the full tier of ci.yml (called, not copied), on main's code: an external
+#                      dependency that broke (Docker Hub images, tool downloads, upstream checksums, the
+#                      runner image) shows here instead of on the next code change
+#   flake-unit         the unit suite under -race, each test COUNT times (default 3), -shuffle=on
+#   flake-integration  the integration suite under -race, twice, -shuffle=on
+#   flake-ui           vitest with --sequence.shuffle; known to fail on pre-existing order dependencies
+#                      (docs/verification/runs/2026-10-16-ui-flake.md), so it never fails the run
+#   report             when drift or a Go flake job failed: opens the tracking issue "Scheduled CI run
+#                      failed", or comments on it when it is already open
+# Failures upload the go test JSON streams, the integration logs, the shuffle and rapid seeds and the
+# new rapid fail files (hack/ci/flake-seeds.sh). Every job calls `make` targets (hack/ci.mk), so each
+# one runs on a developer machine the same way.
+name: Scheduled CI
+
+on:
+  schedule:
+    # Sundays 03:17 UTC: off the hour (GitHub delays scheduled runs at :00 under load) and away from
+    # the weekday pushes. GitHub disables a schedule after 60 days without activity in the repository.
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: How many times the unit suite runs each test (1-8)
+        type: number
+        default: 3
+      drift:
+        description: Also run the full tier of ci.yml (dependency drift)
+        type: boolean
+        default: true
+
+permissions: {}
+
+# One scheduled run at a time; a second one waits instead of cancelling the first.
+concurrency:
+  group: scheduled-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  drift:
+    name: Dependency drift (full tier)
+    if: github.event_name == 'schedule' || inputs.drift
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+
+  flake-unit:
+    name: Flake hunt (unit, -race, shuffled)
+    runs-on: ubuntu-24.04
+    # COUNT 8 is at most 300 minutes of tests (CI_UNIT_WALL in hack/ci.mk) plus the setup.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    outputs:
+      failures: ${{ steps.failures.outputs.failures }}
+    env:
+      COUNT: ${{ inputs.count || 3 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the count
+        run: |
+          if [[ ! $COUNT =~ ^[1-8]$ ]]; then
+            echo "::error::count must be a whole number from 1 to 8 (got '$COUNT')"
+            exit 1
+          fi
+      - name: Make sure sshd can run
+        run: |
+          test -x /usr/sbin/sshd || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends openssh-server; }
+          sudo install -d -m 0755 /run/sshd
+      - name: Set up Go and the pinned tools
+        id: setup
+        uses: ./.github/actions/setup
+        with:
+          profile: unit
+          tools: helm kubectl
+          envtest: "true"
+          cache-name: race-unit
+      - name: Go tests (-race -count=${{ env.COUNT }} -shuffle=on)
+        run: make ci-flake-unit CI_FLAKE_COUNT="$COUNT"
+      - name: Seeds
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: make ci-flake-seeds
+      - name: Failed tests
+        id: failures
+        if: failure() && hashFiles('dist/ci/unit-report.json') != ''
+        run: |
+          delim=EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+          {
+            echo "failures<<$delim"
+            jq -r '.failures[] | "\(.package) \(.test // "") [\(.kind)]"' dist/ci/unit-report.json | sort -u | head -n 40
+            echo "$delim"
+          } >>"$GITHUB_OUTPUT"
+      - name: Compress the test event stream
+        if: failure() && hashFiles('dist/ci/unit.json') != ''
+        run: gzip -f dist/ci/unit.json
+      - name: Upload the reports, the event stream and the seeds
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flake-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/ci/unit-report.json
+            dist/ci/unit-summary.md
+            dist/ci/unit.stderr
+            dist/ci/unit.json.gz
+            dist/ci/seeds.md
+            dist/ci/rapid/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  flake-integration:
+    name: Flake hunt (integration twice, -race, shuffled)
+    runs-on: ubuntu-24.04
+    # Twice the integration suite's bounds (CI_INTEGRATION_WALL 150 minutes) plus the setup.
+    timeout-minutes: 170
+    permissions:
+      contents: read
+    outputs:
+      failures: ${{ steps.failures.outputs.failures }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Make sure sshd can run
+        run: |
+          test -x /usr/sbin/sshd || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends openssh-server; }
+          sudo install -d -m 0755 /run/sshd
+      - name: Set up Go and the pinned tools
+        id: setup
+        uses: ./.github/actions/setup
+        with:
+          profile: integration
+          tools: helm
+          envtest: "true"
+          cache-name: race-integration
+      - name: Integration suite (-race -count=2 -shuffle=on)
+        run: make ci-flake-integration
+      - name: Seeds
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: make ci-flake-seeds
+      - name: Failed tests
+        id: failures
+        if: failure() && hashFiles('dist/ci/integration-report.json') != ''
+        run: |
+          delim=EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+          {
+            echo "failures<<$delim"
+            jq -r '.failures[] | "\(.package) \(.test // "") [\(.kind)]"' dist/ci/integration-report.json | sort -u | head -n 40
+            echo "$delim"
+          } >>"$GITHUB_OUTPUT"
+      - name: Compress the test event stream
+        if: failure() && hashFiles('dist/ci/integration.json') != ''
+        run: gzip -f dist/ci/integration.json
+      - name: Upload the logs, the event stream and the seeds
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flake-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/ci/integration-report.json
+            dist/ci/integration-summary.md
+            dist/ci/integration.stderr
+            dist/ci/integration.json.gz
+            dist/ci/integration-logs/
+            dist/ci/seeds.md
+            dist/ci/rapid/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  flake-ui:
+    name: Flake hunt (vitest, shuffled; known order dependencies)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.vitest.outcome }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+      - name: Install pnpm
+        run: hack/ci/setup-pnpm.sh
+      - name: Preflight
+        run: hack/ci/preflight.sh ui
+      - name: Locate the pnpm store
+        id: pnpm
+        run: echo "store=$(pnpm store path --silent)" >>"$GITHUB_OUTPUT"
+      - name: Restore the pnpm store
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-node22.23.3-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-node22.23.3-
+      # The pre-existing order dependencies make this fail until they are fixed: the outcome goes to
+      # the summary and the tracking issue, not to the run's status.
+      - name: vitest --sequence.shuffle
+        id: vitest
+        continue-on-error: true
+        run: make ci-flake-ui
+      - name: Seed
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOME: ${{ steps.vitest.outcome }}
+        run: |
+          {
+            echo "### vitest, shuffled: $OUTCOME"
+            echo
+            echo "\`$(cat dist/ci/ui-shuffle-seed.txt 2>/dev/null || echo 'no seed recorded')\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Upload the seed
+        if: steps.vitest.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flake-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/ci/ui-shuffle-seed.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: Tracking issue
+    needs: [drift, flake-unit, flake-integration, flake-ui]
+    if: >-
+      always() && (needs.drift.result == 'failure' || needs.flake-unit.result == 'failure' ||
+      needs.flake-integration.result == 'failure')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Scheduled CI run failed
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      EVENT: ${{ github.event_name }}
+      SHA: ${{ github.sha }}
+      DRIFT: ${{ needs.drift.result }}
+      UNIT: ${{ needs.flake-unit.result }}
+      INTEGRATION: ${{ needs.flake-integration.result }}
+      UI: ${{ needs.flake-ui.outputs.outcome || needs.flake-ui.result }}
+      UNIT_FAILURES: ${{ needs.flake-unit.outputs.failures }}
+      INTEGRATION_FAILURES: ${{ needs.flake-integration.outputs.failures }}
+      COUNT: ${{ inputs.count || 3 }}
+    steps:
+      - name: Open or update the tracking issue
+        run: |
+          body=$RUNNER_TEMP/body.md
+          {
+            echo "[$EVENT run]($RUN_URL) on \`${SHA:0:7}\` failed."
+            echo
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "| Dependency drift (full tier of ci.yml) | $DRIFT |"
+            echo "| Unit suite, -race -count=$COUNT -shuffle=on | $UNIT |"
+            echo "| Integration suite, -race -count=2 -shuffle=on | $INTEGRATION |"
+            echo "| vitest --sequence.shuffle (known order dependencies; never fails the run) | $UI |"
+            for part in "unit:$UNIT_FAILURES" "integration:$INTEGRATION_FAILURES"; do
+              name=${part%%:*} list=${part#*:}
+              [[ -n $list ]] || continue
+              echo
+              echo "Failed in the $name flake hunt:"
+              echo
+              echo '```'
+              printf '%s\n' "$list"
+              echo '```'
+            done
+            echo
+            echo "The run's artifacts hold the go test JSON streams, the integration logs, \`seeds.md\` (shuffle and rapid seeds) and new rapid fail files. File each new failure as a CI-F finding in \`docs/verification/phase4-findings.md\`; close this issue when a scheduled run passes."
+          } >"$body"
+          number=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+          if [[ -n $number ]]; then
+            gh issue comment "$number" --body-file "$body"
+            echo "Commented on #$number" >>"$GITHUB_STEP_SUMMARY"
+          else
+            url=$(gh issue create --title "$TITLE" --body-file "$body")
+            echo "Opened $url" >>"$GITHUB_STEP_SUMMARY"
+            gh issue edit "$url" --add-label kind/ci,area/ci ||
+              echo "::warning::could not add the labels kind/ci and area/ci"
+          fi
